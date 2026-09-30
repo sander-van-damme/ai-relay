@@ -1,10 +1,10 @@
 import { randomUUID } from "node:crypto";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
-import { loadConfig, resolveProviderApiKey } from "./config.ts";
+import { loadConfig } from "./config.ts";
 import { log } from "./log.ts";
 import { estimateInputTokens } from "./quota.ts";
-import { RelayScheduler } from "./relay.ts";
-import type { ChatCompletionRequest, ProviderId, RelayConfig, RelayJob } from "./types.ts";
+import { isAutoModel, RelayScheduler } from "./relay.ts";
+import type { ChatCompletionRequest, RelayJob } from "./types.ts";
 
 function json(response: ServerResponse, status: number, value: unknown): void {
   response.writeHead(status, {
@@ -27,8 +27,7 @@ async function readJson(request: IncomingMessage, limitBytes: number): Promise<u
     if (size > limitBytes) throw new Error("request_too_large");
     chunks.push(buffer);
   }
-  const text = Buffer.concat(chunks).toString("utf8");
-  return JSON.parse(text);
+  return JSON.parse(Buffer.concat(chunks).toString("utf8"));
 }
 
 function startPersistentResponse(response: ServerResponse, stream: boolean, heartbeatSeconds: number): NodeJS.Timeout {
@@ -61,21 +60,17 @@ function startPersistentResponse(response: ServerResponse, stream: boolean, hear
   return timer;
 }
 
-function modelsPayload(config: RelayConfig): Record<string, unknown> {
+function modelsPayload(scheduler: RelayScheduler): Record<string, unknown> {
   const created = Math.floor(Date.now() / 1000);
-  const concrete = config.models.filter((model) => model.enabled).map((model) => ({
+  const concrete = scheduler.listModels().map((model) => ({
     id: model.id,
     object: "model",
     created,
-    owned_by: model.provider,
+    owned_by: model.providerId,
   }));
-
   return {
     object: "list",
-    data: [
-      { id: "auto", object: "model", created, owned_by: "ai-relay" },
-      ...concrete,
-    ],
+    data: [{ id: "auto", object: "model", created, owned_by: "ai-relay" }, ...concrete],
   };
 }
 
@@ -83,12 +78,12 @@ async function main(): Promise<void> {
   const config = await loadConfig();
   const scheduler = new RelayScheduler(config);
 
-  for (const providerId of Object.keys(config.providers) as ProviderId[]) {
-    const credential = resolveProviderApiKey(providerId);
-    log(credential ? "info" : "warn", "provider_config", {
-      provider: providerId,
-      configured: Boolean(credential),
-      credential_env: credential?.env ?? null,
+  for (const provider of scheduler.providers) {
+    log(provider.isConfigured() ? "info" : "warn", "provider_config", {
+      provider: provider.id,
+      configured: provider.isConfigured(),
+      credential_env: provider.credentialEnv,
+      models: provider.listModels().map((model) => model.id),
     });
   }
 
@@ -98,22 +93,19 @@ async function main(): Promise<void> {
     if (request.method === "GET" && url.pathname === "/") {
       json(response, 200, {
         name: "ai-relay",
-        mode: "self-hosted-static-config",
+        mode: "provider-offer-scheduler",
         endpoints: ["/health", "/v1/models", "/v1/chat/completions"],
       });
       return;
     }
-
     if (request.method === "GET" && url.pathname === "/health") {
       json(response, 200, { status: "ok", ...scheduler.status() });
       return;
     }
-
     if (request.method === "GET" && url.pathname === "/v1/models") {
-      json(response, 200, modelsPayload(config));
+      json(response, 200, modelsPayload(scheduler));
       return;
     }
-
     if (request.method !== "POST" || url.pathname !== "/v1/chat/completions") {
       openAiHttpError(response, 404, "not_found", "Endpoint not found.");
       return;
@@ -132,16 +124,13 @@ async function main(): Promise<void> {
     }
 
     const requestedModel = typeof body.model === "string" && body.model.trim() ? body.model.trim() : "auto";
-    const stream = body.stream === true;
-    const isKnown = requestedModel === "auto" || ["relay/auto", "free", "best-free", "best"].includes(requestedModel)
-      || config.models.some((model) => model.enabled && model.id === requestedModel);
-    if (!isKnown) {
+    if (!isAutoModel(requestedModel) && !scheduler.hasModel(requestedModel)) {
       openAiHttpError(response, 404, "model_not_found", `Configured model not found: ${requestedModel}`);
       return;
     }
 
+    const stream = body.stream === true;
     const heartbeatTimer = startPersistentResponse(response, stream, config.server.heartbeatSeconds);
-
     const job: RelayJob = {
       id: randomUUID(),
       body: { ...body, model: requestedModel, stream },
@@ -150,9 +139,11 @@ async function main(): Promise<void> {
       estimatedInputTokens: estimateInputTokens(body),
       requestedModel,
       stream,
-      excludedModels: new Set<string>(),
+      excludedModelIds: new Set<string>(),
       cancelled: false,
       bypassCount: 0,
+      failureCount: 0,
+      yieldOnce: false,
       heartbeatTimer,
     };
 
@@ -174,7 +165,7 @@ async function main(): Promise<void> {
     log("info", "server_started", {
       host: config.server.host,
       port: config.server.port,
-      models: config.models.filter((model) => model.enabled).map((model) => model.id),
+      models: scheduler.listModels().map((model) => model.id),
     });
   });
 

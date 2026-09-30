@@ -69,9 +69,13 @@ async function installFiles() {
   run("chown", ["-R", "ai-relay:ai-relay", installDir]);
 }
 
+async function readPort() {
+  const config = JSON.parse(await readFile(resolve(repoRoot, "config/relay.json"), "utf8"));
+  return Number(config?.server?.port ?? 8787);
+}
+
 async function verifyHealth() {
-  const config = JSON.parse(await readFile(resolve(repoRoot, "config/models.json"), "utf8"));
-  const port = Number(config?.server?.port ?? 8787);
+  const port = await readPort();
   const healthUrl = `http://127.0.0.1:${port}/health`;
   let lastError;
   for (let attempt = 0; attempt < 20; attempt += 1) {
@@ -99,8 +103,7 @@ async function main() {
   run("systemctl", ["restart", "ai-relay"]);
   await verifyHealth();
 
-  const config = JSON.parse(await readFile(resolve(repoRoot, "config/models.json"), "utf8"));
-  const port = Number(config?.server?.port ?? 8787);
+  const port = await readPort();
   console.log(`AI Relay is installed and running at http://127.0.0.1:${port}`);
   console.log(`Provider secrets: ${envTarget}`);
   console.log("Logs: journalctl -u ai-relay -f");
