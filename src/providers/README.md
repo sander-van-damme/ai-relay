@@ -75,13 +75,13 @@ An overflow offer may only relax quota dimensions that the relay implementation 
 - concurrency limits;
 - minimum request spacing;
 - provider/model health cooldowns;
-- quota dimensions that were not explicitly marked as overflowable.
+- quota dimensions that were not explicitly marked as overflow-eligible by the relay.
 
 For example, the current Google integration may use speculative overflow for requests-per-day because observed behavior has sometimes allowed requests beyond the nominal daily limit. This is not a public or documented Google capability, and it must not be treated as guaranteed behavior. RPM and TPM exhaustion continue to behave as normal queueing constraints.
 
 Capacity rules still apply during overflow selection. For a 200,000-token request, a 16,000-token model is never eligible, while an otherwise quota-exhausted model with at least 200,000 tokens of effective request capacity may be eligible for an overflow offer.
 
-A provider should only expose an overflow offer when the request would otherwise be delayed specifically by an opted-in quota. It should not expose speculative offers while the same model is normally available.
+A provider should only expose an overflow offer when the request would otherwise be delayed specifically by a quota dimension that the relay has marked as overflow-eligible. It should not expose speculative offers while the same model is normally available.
 
 The scheduler always prefers a standard offer that is usable inside its optimization window. Only when no such standard offer exists does it ask providers for overflow offers. If no overflow offer is available, the scheduler returns to the earliest standard offer and keeps the request queued.
 
