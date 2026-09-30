@@ -4,8 +4,10 @@ import {
   calendarDayBounds,
   effectiveInputCapacity,
   emptyQuotaState,
+  quotaCanOverflow,
   quotaDelayMs,
   reserveQuota,
+  type QuotaLimitName,
   type QuotaPolicy,
 } from "../src/providers/shared/quota.ts";
 import { estimateInputTokens } from "../src/request-estimate.ts";
@@ -66,4 +68,42 @@ test("Google-style calendar day resets at Pacific midnight", () => {
   assert.equal(quotaDelayMs(policy, state, 1, now), 15 * 60_000);
   assert.equal(calendarDayBounds(now, "America/Los_Angeles").end, Date.parse("2026-10-01T07:00:00Z"));
   assert.equal(quotaDelayMs(policy, state, 1, Date.parse("2026-10-01T07:00:01Z")), 0);
+});
+
+test("overflow eligibility can be limited to selected quota dimensions", () => {
+  const policy: QuotaPolicy = {
+    maxConcurrent: null,
+    dailyWindow: { type: "rolling" },
+    limits: {
+      requestsPerMinute: null,
+      inputTokensPerMinute: 1_000,
+      requestsPerDay: 1,
+      minimumSpacingMs: 0,
+    },
+  };
+  const state = emptyQuotaState();
+  reserveQuota(policy, state, 50, 1_000);
+  state.active = 0;
+
+  const overflowLimits = new Set<QuotaLimitName>(["requestsPerDay"]);
+  assert.equal(quotaCanOverflow(policy, state, 50, overflowLimits, 2_000, 2_000), true);
+});
+
+test("overflow stays unavailable when another quota dimension is exhausted", () => {
+  const policy: QuotaPolicy = {
+    maxConcurrent: null,
+    dailyWindow: { type: "rolling" },
+    limits: {
+      requestsPerMinute: null,
+      inputTokensPerMinute: 100,
+      requestsPerDay: 1,
+      minimumSpacingMs: 0,
+    },
+  };
+  const state = emptyQuotaState();
+  reserveQuota(policy, state, 80, 1_000);
+  state.active = 0;
+
+  const overflowLimits = new Set<QuotaLimitName>(["requestsPerDay"]);
+  assert.equal(quotaCanOverflow(policy, state, 50, overflowLimits, 2_000, 2_000), false);
 });

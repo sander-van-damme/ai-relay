@@ -3,9 +3,11 @@ import {
   emptyQuotaState,
   parseRetryAfterMs,
   quotaCanEverHandle,
+  quotaCanOverflow,
   quotaDelayMs,
   releaseQuota,
   reserveQuota,
+  type QuotaLimitName,
   type QuotaPolicy,
   type QuotaRuntimeState,
 } from "./quota.ts";
@@ -33,6 +35,10 @@ export interface OpenAICompatibleProviderOptions {
   baseUrl: string;
   defaultRetryMs: number;
   providerFailureCooldownMs: number;
+  overflowProbe?: {
+    hardCapTtlMs: number;
+    limits: readonly QuotaLimitName[];
+  };
   providerQuota?: QuotaPolicy;
   models: readonly ManagedModel[];
 }
@@ -63,12 +69,17 @@ export class OpenAICompatibleProvider implements Provider {
   private readonly baseUrl: string;
   private readonly defaultRetryMs: number;
   private readonly providerFailureCooldownMs: number;
+  private readonly overflowProbe?: {
+    hardCapTtlMs: number;
+    limits: ReadonlySet<QuotaLimitName>;
+  };
   private readonly providerQuota?: QuotaPolicy;
   private readonly models: readonly ManagedModel[];
   private readonly modelStates = new Map<string, QuotaRuntimeState>();
   private readonly providerState = emptyQuotaState();
   private providerFailureCount = 0;
   private readonly modelFailureCounts = new Map<string, number>();
+  private readonly modelOverflowBlockedUntil = new Map<string, number>();
 
   constructor(options: OpenAICompatibleProviderOptions) {
     this.id = options.id;
@@ -77,6 +88,12 @@ export class OpenAICompatibleProvider implements Provider {
     this.baseUrl = options.baseUrl.replace(/\/$/, "");
     this.defaultRetryMs = options.defaultRetryMs;
     this.providerFailureCooldownMs = options.providerFailureCooldownMs;
+    this.overflowProbe = options.overflowProbe
+      ? {
+          hardCapTtlMs: options.overflowProbe.hardCapTtlMs,
+          limits: new Set(options.overflowProbe.limits),
+        }
+      : undefined;
     this.providerQuota = options.providerQuota;
     this.models = options.models;
     for (const model of this.models) this.modelStates.set(model.id, emptyQuotaState());
@@ -106,18 +123,58 @@ export class OpenAICompatibleProvider implements Provider {
     if (!quotaCanEverHandle(model.quota, request.estimatedInputTokens, model.contextWindowTokens)) return null;
 
     const state = this.modelState(model.id);
-    const delays = [
-      quotaDelayMs(model.quota, state, request.estimatedInputTokens, now),
-      Math.max(0, this.providerState.blockedUntil - now),
-    ];
+    const modelDelayMs = quotaDelayMs(model.quota, state, request.estimatedInputTokens, now);
+    const providerBlockedMs = Math.max(0, this.providerState.blockedUntil - now);
+
+    if (request.offerKind === "overflow") {
+      if (!this.overflowProbe || providerBlockedMs > 0) return null;
+      if ((this.modelOverflowBlockedUntil.get(model.id) ?? 0) > now) return null;
+
+      const modelCanOverflow = quotaCanOverflow(
+        model.quota,
+        state,
+        request.estimatedInputTokens,
+        this.overflowProbe.limits,
+        model.contextWindowTokens,
+        now,
+      );
+
+      let providerDelayMs = 0;
+      let providerCanOverflow = false;
+      if (this.providerQuota) {
+        if (!quotaCanEverHandle(this.providerQuota, request.estimatedInputTokens)) return null;
+        providerDelayMs = quotaDelayMs(this.providerQuota, this.providerState, request.estimatedInputTokens, now);
+        providerCanOverflow = quotaCanOverflow(
+          this.providerQuota,
+          this.providerState,
+          request.estimatedInputTokens,
+          this.overflowProbe.limits,
+          Number.POSITIVE_INFINITY,
+          now,
+        );
+      }
+
+      if (modelDelayMs > 0 && !modelCanOverflow) return null;
+      if (providerDelayMs > 0 && !providerCanOverflow) return null;
+      if (!modelCanOverflow && !providerCanOverflow) return null;
+
+      return {
+        model,
+        delayMs: 0,
+        inputCapacityTokens: effectiveInputCapacity(model.quota, model.contextWindowTokens),
+        index,
+      };
+    }
+
+    const delays = [modelDelayMs, providerBlockedMs];
     if (this.providerQuota) {
       if (!quotaCanEverHandle(this.providerQuota, request.estimatedInputTokens)) return null;
       delays.push(quotaDelayMs(this.providerQuota, this.providerState, request.estimatedInputTokens, now));
     }
-    const delayMs = Math.max(...delays);
+
     return {
       model,
-      delayMs,
+      delayMs: Math.max(...delays),
       inputCapacityTokens: effectiveInputCapacity(model.quota, model.contextWindowTokens),
       index,
     };
@@ -142,6 +199,7 @@ export class OpenAICompatibleProvider implements Provider {
     }
 
     return {
+      kind: request.offerKind,
       providerId: this.id,
       providerPriority: this.priority,
       modelId: chosen.model.id,
@@ -249,11 +307,19 @@ export class OpenAICompatibleProvider implements Provider {
     const retryAfterMs = parseRetryAfterMs(response.headers.get("retry-after"), this.defaultRetryMs);
 
     if (response.status === 429) {
+      const failedAt = Date.now();
+      if (offer.kind === "overflow" && this.overflowProbe) {
+        const blockedUntil = failedAt + this.overflowProbe.hardCapTtlMs;
+        this.modelOverflowBlockedUntil.set(
+          model.id,
+          Math.max(this.modelOverflowBlockedUntil.get(model.id) ?? 0, blockedUntil),
+        );
+      }
       return {
         status: "retryable",
         scope: "model",
-        reason: "rate_limit",
-        retryAt: this.blockModel(model, retryAfterMs, Date.now()),
+        reason: offer.kind === "overflow" ? "overflow_limit_confirmed" : "rate_limit",
+        retryAt: this.blockModel(model, retryAfterMs, failedAt),
       };
     }
     if (response.status === 408 || response.status >= 500) {
@@ -283,6 +349,9 @@ export class OpenAICompatibleProvider implements Provider {
           id: model.id,
           active: state.active,
           blockedUntil: state.blockedUntil > now ? state.blockedUntil : null,
+          overflowBlockedUntil: (this.modelOverflowBlockedUntil.get(model.id) ?? 0) > now
+            ? this.modelOverflowBlockedUntil.get(model.id)!
+            : null,
         };
       }),
     };

@@ -1,6 +1,9 @@
 import type { ChatCompletionRequest } from "../../types.ts";
 
+export type ProviderOfferKind = "standard" | "overflow";
+
 export interface OfferRequest {
+  offerKind: ProviderOfferKind;
   requestedModel: string;
   estimatedInputTokens: number;
   maxOptimizationWaitMs: number;
@@ -8,6 +11,7 @@ export interface OfferRequest {
 }
 
 export interface ProviderOffer {
+  kind: ProviderOfferKind;
   providerId: string;
   providerPriority: number;
   modelId: string;
@@ -29,6 +33,7 @@ export interface ProviderStatus {
     id: string;
     active: number;
     blockedUntil: number | null;
+    overflowBlockedUntil: number | null;
   }>;
 }
 

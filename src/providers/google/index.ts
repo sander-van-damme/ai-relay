@@ -4,6 +4,7 @@ import { OpenAICompatibleProvider, type ManagedModel } from "../shared/openai-co
 const GOOGLE_DAY = { type: "calendar-day", timeZone: "America/Los_Angeles" } as const;
 const DEFAULT_RETRY_MS = 5_000;
 const PROVIDER_FAILURE_COOLDOWN_MS = 15_000;
+const OVERFLOW_HARD_CAP_TTL_MS = 24 * 60 * 60 * 1000;
 
 function quota(rpm: number, tpm: number, rpd: number): QuotaPolicy {
   return {
@@ -85,6 +86,10 @@ export function createGoogleProvider(): OpenAICompatibleProvider {
     baseUrl: "https://generativelanguage.googleapis.com/v1beta/openai",
     defaultRetryMs: DEFAULT_RETRY_MS,
     providerFailureCooldownMs: PROVIDER_FAILURE_COOLDOWN_MS,
+    overflowProbe: {
+      hardCapTtlMs: OVERFLOW_HARD_CAP_TTL_MS,
+      limits: ["requestsPerDay"],
+    },
     models: GOOGLE_MODELS,
   });
 }

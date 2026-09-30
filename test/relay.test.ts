@@ -62,6 +62,9 @@ class FakeProvider implements Provider {
   failFirstFor = new Set<string>();
   failAlwaysFor = new Set<string>();
   blockOnFailure = true;
+  supportsOverflow = false;
+  standardAvailableAt = 0;
+  readonly executionKinds: string[] = [];
 
   readonly id: string;
   readonly priority: number;
@@ -78,18 +81,24 @@ class FakeProvider implements Provider {
     return [{ id: `${this.id}/model`, providerId: this.id, inputCapacityTokens: this.capacity }];
   }
   getBestOffer(request: OfferRequest, now = Date.now()): ProviderOffer | null {
+    if (request.offerKind === "overflow" && !this.supportsOverflow) return null;
     if (request.requestedModel !== "auto" && request.requestedModel !== `${this.id}/model`) return null;
     if (request.excludedModelIds.has(`${this.id}/model`) || request.estimatedInputTokens > this.capacity) return null;
     return {
+      kind: request.offerKind,
       providerId: this.id,
       providerPriority: this.priority,
       modelId: `${this.id}/model`,
       inputCapacityTokens: this.capacity,
-      availableAt: this.active ? Number.POSITIVE_INFINITY : Math.max(now, this.blockedUntil),
+      availableAt: request.offerKind === "overflow"
+        ? now
+        : this.active
+          ? Number.POSITIVE_INFINITY
+          : Math.max(now, this.standardAvailableAt, this.blockedUntil),
     };
   }
   async execute(
-    _offer: ProviderOffer,
+    offer: ProviderOffer,
     body: ChatCompletionRequest,
     _stream: boolean,
     _estimatedInputTokens: number,
@@ -97,6 +106,7 @@ class FakeProvider implements Provider {
   ): Promise<ProviderExecutionResult> {
     const id = String(body.testId);
     this.executionOrder.push(id);
+    this.executionKinds.push(offer.kind);
     this.active = true;
     await new Promise((resolve) => setTimeout(resolve, 0));
     this.active = false;
@@ -107,7 +117,12 @@ class FakeProvider implements Provider {
     return { status: "success", response: new Response(JSON.stringify({ id, provider: this.id })), release: () => undefined };
   }
   status(): ProviderStatus {
-    return { id: this.id, configured: true, blockedUntil: this.blockedUntil || null, models: [{ id: `${this.id}/model`, active: 0, blockedUntil: null }] };
+    return {
+      id: this.id,
+      configured: true,
+      blockedUntil: this.blockedUntil || null,
+      models: [{ id: `${this.id}/model`, active: 0, blockedUntil: null, overflowBlockedUntil: null }],
+    };
   }
 }
 
@@ -119,8 +134,8 @@ test("optimization wait halves after every failed execution", () => {
 
 test("offer selection waits up to cutoff for smaller capacity", () => {
   const now = 1_000_000;
-  const small: ProviderOffer = { providerId: "google", providerPriority: 10, modelId: "small", inputCapacityTokens: 16_000, availableAt: now + 12_000 };
-  const large: ProviderOffer = { providerId: "nvidia", providerPriority: 20, modelId: "large", inputCapacityTokens: 32_000, availableAt: now };
+  const small: ProviderOffer = { kind: "standard", providerId: "google", providerPriority: 10, modelId: "small", inputCapacityTokens: 16_000, availableAt: now + 12_000 };
+  const large: ProviderOffer = { kind: "standard", providerId: "nvidia", providerPriority: 20, modelId: "large", inputCapacityTokens: 32_000, availableAt: now };
   assert.equal(selectOffer([small, large], now, 15_000)?.modelId, "small");
   assert.equal(selectOffer([{ ...small, availableAt: now + 30_000 }, large], now, 15_000)?.modelId, "large");
 });
@@ -176,4 +191,39 @@ test("retryable failures exhaust a finite per-request path budget", async () => 
   assert.equal(p.executionOrder.length, MAX_RETRYABLE_FAILURES_PER_PATH);
   assert.equal(response.writableEnded, true);
   assert.match(response.body, /upstream_unavailable/);
+});
+
+test("standard offer inside the optimization window beats immediate overflow", async () => {
+  const standard = new FakeProvider("standard", 20, 32_000);
+  standard.standardAvailableAt = Date.now() + 5;
+  const overflow = new FakeProvider("overflow", 10, 16_000);
+  overflow.supportsOverflow = true;
+  overflow.standardAvailableAt = Date.now() + 60_000;
+
+  const scheduler = new RelayScheduler(config(), [overflow, standard]);
+  const response = new FakeResponse();
+  scheduler.enqueue(job("A", response));
+
+  await new Promise((resolve) => setTimeout(resolve, 30));
+
+  assert.deepEqual(standard.executionOrder, ["A"]);
+  assert.deepEqual(standard.executionKinds, ["standard"]);
+  assert.deepEqual(overflow.executionOrder, []);
+  assert.equal(response.writableEnded, true);
+});
+
+test("overflow is used as an immediate last resort before a long quota wait", async () => {
+  const p = new FakeProvider("overflow", 10, 32_000);
+  p.supportsOverflow = true;
+  p.standardAvailableAt = Date.now() + 60_000;
+
+  const scheduler = new RelayScheduler(config(), [p]);
+  const response = new FakeResponse();
+  scheduler.enqueue(job("A", response));
+
+  await new Promise((resolve) => setTimeout(resolve, 30));
+
+  assert.deepEqual(p.executionOrder, ["A"]);
+  assert.deepEqual(p.executionKinds, ["overflow"]);
+  assert.equal(response.writableEnded, true);
 });

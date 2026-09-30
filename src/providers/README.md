@@ -41,6 +41,48 @@ A request that can never fit must not produce an offer.
 
 If a request can be handled later, `availableAt` must describe the earliest realistic start time. Cross-provider comparison belongs only to the relay scheduler.
 
+## Standard and overflow offers
+
+The scheduler requests offers in two modes:
+
+- `standard`: normal provider behavior using the provider's known quota and health state;
+- `overflow`: an optional speculative last-resort attempt after no standard offer is usable inside the scheduler's normal optimization window.
+
+A provider must return the same kind in `ProviderOffer.kind` that was requested through `OfferRequest.offerKind`.
+
+Overflow support is optional and provider-specific. Do not assume that an upstream accepts requests beyond a documented quota simply because another provider sometimes does.
+
+An overflow offer may only relax quota dimensions that the concrete provider has explicitly opted into. It must never ignore:
+
+- model context/input capacity;
+- a hard single-request token ceiling;
+- concurrency limits;
+- minimum request spacing;
+- provider/model health cooldowns;
+- quota dimensions that were not explicitly marked as overflowable.
+
+For example, the current Google provider allows speculative overflow for requests-per-day only. RPM and TPM exhaustion continue to behave as normal queueing constraints.
+
+Capacity rules still apply during overflow selection. For a 200,000-token request, a 16,000-token model is never eligible, while an otherwise quota-exhausted model with at least 200,000 tokens of effective request capacity may be eligible for an overflow offer.
+
+A provider should only expose an overflow offer when the request would otherwise be delayed specifically by an opted-in quota. It should not expose speculative offers while the same model is normally available.
+
+The scheduler always prefers a standard offer that is usable inside its optimization window. Only when no such standard offer exists does it ask providers for overflow offers. If no overflow offer is available, the scheduler returns to the earliest standard offer and keeps the request queued.
+
+### Learning a hard quota cap
+
+A failed speculative attempt can provide stronger evidence than the local quota model.
+
+When an overflow request receives a provider quota response such as HTTP `429`, the provider may remember that the attempted model has reached a hard cap and temporarily stop advertising overflow for that model.
+
+The current Google/OpenAI-compatible implementation caches that observation for 24 hours. The cache is process-local and only suppresses overflow offers; normal offers still become available at their usual quota reset time.
+
+Network failures, timeouts and `5xx` responses must not mark the quota as a hard cap because they do not prove that the quota caused the failure.
+
+A successful overflow request does not mark the model as capped. If its normal quota remains exhausted, the provider may offer another speculative attempt later.
+
+For `auto` routing, a model-scoped overflow failure should return to the scheduler rather than starting a hidden retry loop inside `execute()`. The scheduler can ask the provider for another overflow offer with the failed model excluded, allowing the provider to return its next eligible model. This keeps each upstream attempt visible to queue fairness, retry budgets and logging.
+
 ## Quota ownership
 
 Quota semantics belong to the provider. `shared/quota.ts` can be reused when its semantics match, but a provider should implement its own rules when they differ.
@@ -90,6 +132,10 @@ A provider is incomplete until tests cover at least:
 8. Successful execution releases concurrency/quota state.
 9. Explicit model selection stays on the requested model.
 10. `auto` returns the provider's best valid offer according to that provider's rules.
+11. Standard offers are preferred over overflow offers.
+12. Overflow never exceeds hard request capacity or non-opted-in quota dimensions.
+13. A quota rejection from an overflow attempt suppresses repeated probes for the provider-defined hard-cap TTL.
+14. Network/`5xx` failures do not incorrectly create a hard-cap observation.
 
 ## Adding a provider
 

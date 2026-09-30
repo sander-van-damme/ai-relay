@@ -1,7 +1,13 @@
 import { once } from "node:events";
 import type { ServerResponse } from "node:http";
 import { log } from "./log.ts";
-import { createProviders, type Provider, type ProviderExecutionResult, type ProviderOffer } from "./providers/index.ts";
+import {
+  createProviders,
+  type Provider,
+  type ProviderExecutionResult,
+  type ProviderOffer,
+  type ProviderOfferKind,
+} from "./providers/index.ts";
 import type { RelayConfig, RelayJob } from "./types.ts";
 
 const MAX_QUEUE_BYPASSES = 8;
@@ -111,6 +117,9 @@ export class RelayScheduler {
             id: model.id,
             active: model.active,
             blocked_until: model.blockedUntil === null ? null : new Date(model.blockedUntil).toISOString(),
+            overflow_blocked_until: model.overflowBlockedUntil === null
+              ? null
+              : new Date(model.overflowBlockedUntil).toISOString(),
           })),
         };
       }),
@@ -133,7 +142,13 @@ export class RelayScheduler {
     queueMicrotask(() => void this.drain());
   }
 
-  private offers(job: RelayJob, now: number, maxWait: number, avoidLastFailure: boolean): ProviderOffer[] {
+  private offers(
+    job: RelayJob,
+    now: number,
+    maxWait: number,
+    avoidLastFailure: boolean,
+    offerKind: ProviderOfferKind,
+  ): ProviderOffer[] {
     const requestedModel = isAutoModel(job.requestedModel) ? "auto" : job.requestedModel;
     const excludedModelIds = new Set(job.excludedModelIds);
     const lastFailure = avoidLastFailure ? job.lastRetryFailure : undefined;
@@ -143,6 +158,7 @@ export class RelayScheduler {
       .filter((provider) => !job.excludedProviderIds.has(provider.id))
       .filter((provider) => !(lastFailure?.scope === "provider" && lastFailure.providerId === provider.id))
       .map((provider) => provider.getBestOffer({
+        offerKind,
         requestedModel,
         estimatedInputTokens: job.estimatedInputTokens,
         maxOptimizationWaitMs: maxWait,
@@ -153,19 +169,56 @@ export class RelayScheduler {
 
   private choice(job: RelayJob, now: number): JobChoice | null {
     const maxWait = optimizationWaitMs(job.failureCount);
+    const withinStandardWindow = (offer: ProviderOffer): boolean =>
+      offer.availableAt <= now + maxWait;
 
     if (job.lastRetryFailure) {
-      const alternative = selectOffer(this.offers(job, now, maxWait, true), now, maxWait);
-      if (alternative && alternative.availableAt <= now + maxWait) {
-        const provider = this.providerById.get(alternative.providerId);
-        if (provider) return { provider, offer: alternative };
+      const standardAlternative = selectOffer(
+        this.offers(job, now, maxWait, true, "standard"),
+        now,
+        maxWait,
+      );
+      if (standardAlternative && withinStandardWindow(standardAlternative)) {
+        const provider = this.providerById.get(standardAlternative.providerId);
+        if (provider) return { provider, offer: standardAlternative };
       }
     }
 
-    const selected = selectOffer(this.offers(job, now, maxWait, false), now, maxWait);
-    if (!selected) return null;
-    const provider = this.providerById.get(selected.providerId);
-    return provider ? { provider, offer: selected } : null;
+    const standard = selectOffer(
+      this.offers(job, now, maxWait, false, "standard"),
+      now,
+      maxWait,
+    );
+    if (standard && withinStandardWindow(standard)) {
+      const provider = this.providerById.get(standard.providerId);
+      if (provider) return { provider, offer: standard };
+    }
+
+    if (job.lastRetryFailure) {
+      const overflowAlternative = selectOffer(
+        this.offers(job, now, 0, true, "overflow"),
+        now,
+        0,
+      );
+      if (overflowAlternative && overflowAlternative.availableAt <= now) {
+        const provider = this.providerById.get(overflowAlternative.providerId);
+        if (provider) return { provider, offer: overflowAlternative };
+      }
+    }
+
+    const overflow = selectOffer(
+      this.offers(job, now, 0, false, "overflow"),
+      now,
+      0,
+    );
+    if (overflow && overflow.availableAt <= now) {
+      const provider = this.providerById.get(overflow.providerId);
+      if (provider) return { provider, offer: overflow };
+    }
+
+    if (!standard) return null;
+    const provider = this.providerById.get(standard.providerId);
+    return provider ? { provider, offer: standard } : null;
   }
 
   private failNoOffer(job: RelayJob): void {
@@ -220,6 +273,7 @@ export class RelayScheduler {
       request_id: job.id,
       relay_model: choice.offer.modelId,
       provider: choice.offer.providerId,
+      offer_kind: choice.offer.kind,
       queue_ms: now - job.enqueuedAt,
       queue_bypasses: job.bypassCount,
       failure_count: job.failureCount,
@@ -363,6 +417,7 @@ export class RelayScheduler {
         request_id: job.id,
         relay_model: offer.modelId,
         provider: provider.id,
+        offer_kind: offer.kind,
         scope: result.scope,
         reason: result.reason,
         retry_count: retryCount,
@@ -378,6 +433,7 @@ export class RelayScheduler {
         request_id: job.id,
         relay_model: offer.modelId,
         provider: provider.id,
+        offer_kind: offer.kind,
         scope: result.scope,
         status: result.httpStatus,
       });
@@ -396,6 +452,7 @@ export class RelayScheduler {
       request_id: job.id,
       relay_model: offer.modelId,
       provider: provider.id,
+      offer_kind: offer.kind,
       status: result.response.status,
       connect_ms: Date.now() - startedAt,
     });
@@ -410,6 +467,7 @@ export class RelayScheduler {
         request_id: job.id,
         relay_model: offer.modelId,
         provider: provider.id,
+        offer_kind: offer.kind,
         failovers: job.failureCount,
         total_ms: Date.now() - job.enqueuedAt,
       });
