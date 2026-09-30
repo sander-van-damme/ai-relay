@@ -1,21 +1,23 @@
 import { once } from "node:events";
 import type { ServerResponse } from "node:http";
-import { resolveProviderApiKey } from "./config.ts";
+import { providerApiKeyEnv, resolveProviderApiKey } from "./config.ts";
 import { log } from "./log.ts";
 import {
   parseRetryAfterMs,
+  quotaCanEverHandle,
   quotaDelayMs,
   reserveQuota,
 } from "./quota.ts";
 import type {
-  ChatCompletionRequest,
   ModelConfig,
   ModelRuntimeState,
+  ProviderId,
   RelayConfig,
   RelayJob,
 } from "./types.ts";
 
 const AUTO_MODELS = new Set(["auto", "relay/auto", "free", "best-free", "best"]);
+const MAX_QUEUE_BYPASSES = 8;
 
 function isAuto(model: string): boolean {
   return AUTO_MODELS.has(model);
@@ -52,14 +54,18 @@ interface CandidateAvailability {
 
 export class RelayScheduler {
   readonly config: RelayConfig;
-  readonly states = new Map<string, ModelRuntimeState>();
+  readonly modelStates = new Map<string, ModelRuntimeState>();
+  readonly providerStates = new Map<ProviderId, ModelRuntimeState>();
   readonly queue: RelayJob[] = [];
   private timer?: NodeJS.Timeout;
   private draining = false;
 
   constructor(config: RelayConfig) {
     this.config = config;
-    for (const model of config.models) this.states.set(model.id, emptyState());
+    for (const model of config.models) this.modelStates.set(model.id, emptyState());
+    for (const provider of Object.keys(config.providers) as ProviderId[]) {
+      this.providerStates.set(provider, emptyState());
+    }
   }
 
   enqueue(job: RelayJob): void {
@@ -75,16 +81,27 @@ export class RelayScheduler {
   }
 
   status(): Record<string, unknown> {
+    const now = Date.now();
     return {
       queue_depth: this.queue.filter((job) => !job.cancelled).length,
+      providers: (Object.entries(this.config.providers) as [ProviderId, RelayConfig["providers"][ProviderId]][])
+        .map(([id, provider]) => {
+          const state = this.providerStates.get(id) ?? emptyState();
+          return {
+            id,
+            active: state.active,
+            max_concurrent: provider.maxConcurrent,
+            blocked_until: state.blockedUntil > now ? new Date(state.blockedUntil).toISOString() : null,
+          };
+        }),
       models: this.config.models.filter((model) => model.enabled).map((model) => {
-        const state = this.states.get(model.id) ?? emptyState();
+        const state = this.modelStates.get(model.id) ?? emptyState();
         return {
           id: model.id,
           provider: model.provider,
           active: state.active,
           max_concurrent: model.maxConcurrent,
-          blocked_until: state.blockedUntil > Date.now() ? new Date(state.blockedUntil).toISOString() : null,
+          blocked_until: state.blockedUntil > now ? new Date(state.blockedUntil).toISOString() : null,
         };
       }),
     };
@@ -113,22 +130,64 @@ export class RelayScheduler {
   }
 
   private possibleCandidates(job: RelayJob): ModelConfig[] {
-    return this.candidates(job).filter((model) =>
-      model.limits.inputTokensPerMinute === null
-      || job.estimatedInputTokens <= model.limits.inputTokensPerMinute
-    );
+    return this.candidates(job).filter((model) => {
+      const provider = this.config.providers[model.provider];
+      return quotaCanEverHandle(model, job.estimatedInputTokens)
+        && quotaCanEverHandle(provider, job.estimatedInputTokens);
+    });
   }
 
   private availability(job: RelayJob, now: number): CandidateAvailability[] {
-    return this.possibleCandidates(job).map((model) => ({
-      model,
-      delayMs: quotaDelayMs(
+    return this.possibleCandidates(job).map((model) => {
+      const provider = this.config.providers[model.provider];
+      const modelState = this.modelStates.get(model.id) ?? emptyState();
+      const providerState = this.providerStates.get(model.provider) ?? emptyState();
+      return {
         model,
-        this.states.get(model.id) ?? emptyState(),
-        job.estimatedInputTokens,
-        now,
-      ),
-    }));
+        delayMs: Math.max(
+          quotaDelayMs(model, modelState, job.estimatedInputTokens, now),
+          quotaDelayMs(provider, providerState, job.estimatedInputTokens, now),
+        ),
+      };
+    });
+  }
+
+  private failImpossibleJob(job: RelayJob, configuredCandidates: ModelConfig[]): void {
+    const tokenLimited = configuredCandidates.length > 0;
+    const error = openAiError(
+      tokenLimited ? "request_exceeds_configured_tpm" : "model_unavailable",
+      tokenLimited
+        ? "Estimated input tokens exceed the configured inputTokensPerMinute limit for every eligible model/provider path."
+        : isAuto(job.requestedModel)
+          ? "No configured model can handle this request."
+          : `Configured model not found: ${job.requestedModel}`,
+    );
+    job.stream ? finishStreamError(job.response, error) : finishJson(job.response, error);
+  }
+
+  private providerNotConfigured(job: RelayJob, model: ModelConfig): void {
+    const env = providerApiKeyEnv(model.provider);
+    log("warn", "provider_not_configured", {
+      request_id: job.id,
+      provider: model.provider,
+      credential_env: env,
+    });
+
+    if (isAuto(job.requestedModel)) {
+      for (const candidate of this.config.models) {
+        if (candidate.provider === model.provider) job.excludedModels.add(candidate.id);
+      }
+      if (this.candidates(job).length > 0) {
+        this.requeueFirst(job);
+        return;
+      }
+    }
+
+    const error = openAiError(
+      "provider_not_configured",
+      `No API key found for provider ${model.provider}. Set ${env}.`,
+    );
+    job.stream ? finishStreamError(job.response, error) : finishJson(job.response, error);
   }
 
   private async drain(): Promise<void> {
@@ -137,56 +196,79 @@ export class RelayScheduler {
 
     try {
       for (;;) {
-        while (this.queue[0]?.cancelled) this.queue.shift();
-        const job = this.queue[0];
-        if (!job) return;
+        for (let index = this.queue.length - 1; index >= 0; index -= 1) {
+          if (this.queue[index]?.cancelled) this.queue.splice(index, 1);
+        }
+        if (this.queue.length === 0) return;
 
         const now = Date.now();
-        const configuredCandidates = this.candidates(job);
-        const candidates = this.availability(job, now);
-        if (candidates.length === 0) {
-          this.queue.shift();
-          const tokenLimited = configuredCandidates.length > 0;
-          const error = openAiError(
-            tokenLimited ? "request_exceeds_configured_tpm" : "model_unavailable",
-            tokenLimited
-              ? "Estimated input tokens exceed the configured inputTokensPerMinute limit for every eligible model."
-              : isAuto(job.requestedModel)
-                ? "No configured model can handle this request."
-                : `Configured model not found: ${job.requestedModel}`,
-          );
-          job.stream ? finishStreamError(job.response, error) : finishJson(job.response, error);
-          continue;
+        let nextWakeMs = Number.POSITIVE_INFINITY;
+        let changed = false;
+
+        for (let index = 0; index < this.queue.length; index += 1) {
+          const job = this.queue[index];
+          if (!job) continue;
+
+          const configuredCandidates = this.candidates(job);
+          const candidates = this.availability(job, now);
+          if (candidates.length === 0) {
+            this.queue.splice(index, 1);
+            this.failImpossibleJob(job, configuredCandidates);
+            changed = true;
+            break;
+          }
+
+          const ready = candidates.find((candidate) => candidate.delayMs <= 0);
+          if (ready) {
+            const credential = resolveProviderApiKey(ready.model.provider);
+            const skipped = this.queue.slice(0, index);
+            this.queue.splice(index, 1);
+            if (!credential) {
+              this.providerNotConfigured(job, ready.model);
+              changed = true;
+              break;
+            }
+            for (const older of skipped) older.bypassCount += 1;
+
+            const modelState = this.modelStates.get(ready.model.id) ?? emptyState();
+            const providerState = this.providerStates.get(ready.model.provider) ?? emptyState();
+            this.modelStates.set(ready.model.id, modelState);
+            this.providerStates.set(ready.model.provider, providerState);
+            reserveQuota(modelState, job.estimatedInputTokens, now);
+            reserveQuota(providerState, job.estimatedInputTokens, now);
+
+            log("info", "queue_dispatched", {
+              request_id: job.id,
+              relay_model: ready.model.id,
+              provider: ready.model.provider,
+              queue_ms: now - job.enqueuedAt,
+              queue_bypasses: job.bypassCount,
+              queue_depth: this.queue.length,
+            });
+
+            void this.execute(job, ready.model, credential.value, modelState, providerState).finally(() => {
+              modelState.active = Math.max(0, modelState.active - 1);
+              providerState.active = Math.max(0, providerState.active - 1);
+              this.triggerDrain();
+            });
+            changed = true;
+            break;
+          }
+
+          const finiteDelays = candidates
+            .map((candidate) => candidate.delayMs)
+            .filter(Number.isFinite);
+          if (finiteDelays.length > 0) {
+            nextWakeMs = Math.min(nextWakeMs, ...finiteDelays);
+          }
+
+          // Keep the queue work-conserving, but stop younger work from bypassing
+          // one blocked request forever under sustained small-request traffic.
+          if (job.bypassCount >= MAX_QUEUE_BYPASSES) break;
         }
 
-        const ready = candidates.find((candidate) => candidate.delayMs <= 0);
-        if (ready) {
-          this.queue.shift();
-          const state = this.states.get(ready.model.id) ?? emptyState();
-          this.states.set(ready.model.id, state);
-          reserveQuota(state, job.estimatedInputTokens, now);
-
-          log("info", "queue_dispatched", {
-            request_id: job.id,
-            relay_model: ready.model.id,
-            provider: ready.model.provider,
-            queue_ms: now - job.enqueuedAt,
-            queue_depth: this.queue.length,
-          });
-
-          void this.execute(job, ready.model, state).finally(() => {
-            state.active = Math.max(0, state.active - 1);
-            this.triggerDrain();
-          });
-          continue;
-        }
-
-        const finiteDelays = candidates
-          .map((candidate) => candidate.delayMs)
-          .filter(Number.isFinite);
-        if (finiteDelays.length > 0) {
-          this.triggerDrain(Math.max(1, Math.min(...finiteDelays)));
-        }
+        if (changed) continue;
+        if (Number.isFinite(nextWakeMs)) this.triggerDrain(Math.max(1, nextWakeMs));
         return;
       }
     } finally {
@@ -224,19 +306,16 @@ export class RelayScheduler {
     job.stream ? finishStreamError(job.response, error) : finishJson(job.response, error);
   }
 
-  private async execute(job: RelayJob, model: ModelConfig, state: ModelRuntimeState): Promise<void> {
+  private async execute(
+    job: RelayJob,
+    model: ModelConfig,
+    apiKey: string,
+    modelState: ModelRuntimeState,
+    providerState: ModelRuntimeState,
+  ): Promise<void> {
     if (job.cancelled) return;
 
     const provider = this.config.providers[model.provider];
-    const credential = resolveProviderApiKey(provider);
-    if (!credential) {
-      this.terminalForModel(job, model, 503, JSON.stringify(openAiError(
-        "provider_not_configured",
-        `No API key found for provider ${model.provider}. Expected one of: ${provider.apiKeyEnv.join(", ")}`,
-      )));
-      return;
-    }
-
     const controller = new AbortController();
     job.upstreamAbort = controller;
     const timeout = setTimeout(
@@ -251,7 +330,7 @@ export class RelayScheduler {
       response = await fetch(`${provider.baseUrl}/chat/completions`, {
         method: "POST",
         headers: {
-          authorization: `Bearer ${credential.value}`,
+          authorization: `Bearer ${apiKey}`,
           "content-type": "application/json",
           accept: job.stream ? "text/event-stream, application/json" : "application/json",
           "user-agent": "ai-relay/0.1",
@@ -263,7 +342,7 @@ export class RelayScheduler {
       clearTimeout(timeout);
       if (job.cancelled) return;
       const retryMs = this.config.server.retrySeconds * 1000;
-      state.blockedUntil = Math.max(state.blockedUntil, Date.now() + retryMs);
+      modelState.blockedUntil = Math.max(modelState.blockedUntil, Date.now() + retryMs);
       log("warn", "upstream_network_retry", {
         request_id: job.id,
         relay_model: model.id,
@@ -290,7 +369,10 @@ export class RelayScheduler {
           response.headers.get("retry-after"),
           this.config.server.retrySeconds * 1000,
         );
-        state.blockedUntil = Math.max(state.blockedUntil, Date.now() + retryMs);
+        modelState.blockedUntil = Math.max(modelState.blockedUntil, Date.now() + retryMs);
+        if (response.status === 429) {
+          providerState.blockedUntil = Math.max(providerState.blockedUntil, Date.now() + retryMs);
+        }
         log("warn", "upstream_rate_or_transient_retry", {
           request_id: job.id,
           relay_model: model.id,

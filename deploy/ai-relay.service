@@ -9,7 +9,6 @@ User=ai-relay
 Group=ai-relay
 WorkingDirectory=/opt/ai-relay
 EnvironmentFile=/etc/ai-relay.env
-Environment=AI_RELAY_CONFIG=/etc/ai-relay/models.json
 ExecStart=/usr/bin/node /opt/ai-relay/src/index.ts
 Restart=always
 RestartSec=3

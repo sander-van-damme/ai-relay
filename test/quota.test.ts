@@ -1,7 +1,13 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { estimateInputTokens, parseRetryAfterMs, quotaDelayMs, reserveQuota } from "../src/quota.ts";
-import type { ModelConfig, ModelRuntimeState } from "../src/types.ts";
+import {
+  estimateInputTokens,
+  parseRetryAfterMs,
+  quotaCanEverHandle,
+  quotaDelayMs,
+  reserveQuota,
+} from "../src/quota.ts";
+import type { ModelConfig, ModelRuntimeState, ProviderConfig } from "../src/types.ts";
 
 const model: ModelConfig = {
   id: "google/test",
@@ -48,7 +54,33 @@ test("token window waits until enough token usage expires", () => {
 
 test("oversized token request is not dispatchable", () => {
   const runtime = state();
+  assert.equal(quotaCanEverHandle(model, 101), false);
   assert.equal(quotaDelayMs(model, runtime, 101, 1_000), Number.POSITIVE_INFINITY);
+});
+
+test("null concurrency leaves concurrency unrestricted", () => {
+  const runtime = state();
+  runtime.active = 100;
+  assert.equal(quotaDelayMs({ ...model, maxConcurrent: null }, runtime, 10, 1_000), 0);
+});
+
+test("shared provider token state aggregates usage across models", () => {
+  const provider: ProviderConfig = {
+    baseUrl: "https://example.com",
+    maxConcurrent: null,
+    limits: {
+      requestsPerMinute: null,
+      inputTokensPerMinute: 100,
+      requestsPerDay: null,
+      minimumSpacingMs: 0,
+    },
+  };
+  const runtime = state();
+
+  reserveQuota(runtime, 60, 1_000); // model A
+  runtime.active = 0;
+  assert.equal(quotaDelayMs(provider, runtime, 50, 2_000), 59_000); // model B shares provider budget
+  assert.equal(quotaDelayMs(provider, runtime, 40, 2_000), 0);
 });
 
 test("Retry-After seconds are converted to milliseconds", () => {
