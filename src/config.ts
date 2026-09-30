@@ -31,7 +31,6 @@ function parseServer(value: unknown): ServerConfig {
     host: stringValue(raw.host, "server.host", "127.0.0.1"),
     port: numberValue(raw.port, "server.port", 8787, 1, 65535),
     heartbeatSeconds: numberValue(raw.heartbeatSeconds, "server.heartbeatSeconds", 15, 1, 300),
-    retrySeconds: numberValue(raw.retrySeconds, "server.retrySeconds", 5, 1, 300),
     upstreamTimeoutSeconds: numberValue(raw.upstreamTimeoutSeconds, "server.upstreamTimeoutSeconds", 300, 1, 3600),
     bodyLimitBytes: numberValue(raw.bodyLimitBytes, "server.bodyLimitBytes", 10 * 1024 * 1024, 1024, 100 * 1024 * 1024),
   };

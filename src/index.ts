@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { loadConfig } from "./config.ts";
 import { log } from "./log.ts";
-import { estimateInputTokens } from "./quota.ts";
+import { estimateInputTokens } from "./request-estimate.ts";
 import { isAutoModel, RelayScheduler } from "./relay.ts";
 import type { ChatCompletionRequest, RelayJob } from "./types.ts";
 
@@ -82,7 +82,6 @@ async function main(): Promise<void> {
     log(provider.isConfigured() ? "info" : "warn", "provider_config", {
       provider: provider.id,
       configured: provider.isConfigured(),
-      credential_env: provider.credentialEnv,
       models: provider.listModels().map((model) => model.id),
     });
   }
@@ -140,6 +139,8 @@ async function main(): Promise<void> {
       requestedModel,
       stream,
       excludedModelIds: new Set<string>(),
+      excludedProviderIds: new Set<string>(),
+      retryableFailureCounts: new Map<string, number>(),
       cancelled: false,
       bypassCount: 0,
       failureCount: 0,

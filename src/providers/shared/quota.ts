@@ -30,14 +30,6 @@ export interface QuotaRuntimeState {
 const MINUTE_MS = 60_000;
 const DAY_MS = 86_400_000;
 
-export function estimateInputTokens(body: Record<string, unknown>): number {
-  const copy = { ...body };
-  delete copy.model;
-  delete copy.stream;
-  const serialized = JSON.stringify(copy);
-  return Math.max(1, Math.ceil(serialized.length / 4));
-}
-
 export function emptyQuotaState(): QuotaRuntimeState {
   return { active: 0, blockedUntil: 0, lastStartedAt: 0, events: [] };
 }

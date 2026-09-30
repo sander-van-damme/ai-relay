@@ -4,7 +4,6 @@ export interface ServerConfig {
   host: string;
   port: number;
   heartbeatSeconds: number;
-  retrySeconds: number;
   upstreamTimeoutSeconds: number;
   bodyLimitBytes: number;
 }
@@ -28,6 +27,13 @@ export interface RelayJob {
   requestedModel: string;
   stream: boolean;
   excludedModelIds: Set<string>;
+  excludedProviderIds: Set<string>;
+  retryableFailureCounts: Map<string, number>;
+  lastRetryFailure?: {
+    scope: "provider" | "model";
+    providerId: string;
+    modelId: string;
+  };
   cancelled: boolean;
   bypassCount: number;
   failureCount: number;

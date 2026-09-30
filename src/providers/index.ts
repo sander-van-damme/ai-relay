@@ -1,10 +1,9 @@
-import type { ServerConfig } from "../types.ts";
-import { createGoogleProvider } from "./google.ts";
-import { createNvidiaProvider } from "./nvidia.ts";
-import type { Provider } from "./types.ts";
+import { createGoogleProvider } from "./google/index.ts";
+import { createNvidiaProvider } from "./nvidia/index.ts";
+import type { Provider } from "./shared/types.ts";
 
-export function createProviders(server: ServerConfig): Provider[] {
-  return [createGoogleProvider(server), createNvidiaProvider(server)];
+export function createProviders(): Provider[] {
+  return [createGoogleProvider(), createNvidiaProvider()];
 }
 
-export type { OfferRequest, Provider, ProviderExecutionResult, ProviderModelInfo, ProviderOffer, ProviderStatus } from "./types.ts";
+export type { OfferRequest, Provider, ProviderExecutionResult, ProviderFailureScope, ProviderModelInfo, ProviderOffer, ProviderStatus } from "./shared/types.ts";

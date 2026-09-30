@@ -8,8 +8,8 @@ import {
   reserveQuota,
   type QuotaPolicy,
   type QuotaRuntimeState,
-} from "../quota.ts";
-import type { ChatCompletionRequest } from "../types.ts";
+} from "./quota.ts";
+import type { ChatCompletionRequest } from "../../types.ts";
 import type {
   OfferRequest,
   Provider,
@@ -59,8 +59,7 @@ function compareAvailability(left: Candidate, right: Candidate): number {
 export class OpenAICompatibleProvider implements Provider {
   readonly id: string;
   readonly priority: number;
-  readonly credentialEnv: string;
-
+  private readonly credentialEnv: string;
   private readonly baseUrl: string;
   private readonly defaultRetryMs: number;
   private readonly providerFailureCooldownMs: number;
@@ -194,7 +193,7 @@ export class OpenAICompatibleProvider implements Provider {
   ): Promise<ProviderExecutionResult> {
     const apiKey = process.env[this.credentialEnv]?.trim();
     if (!apiKey) {
-      return { status: "retryable", reason: "provider_not_configured", retryAt: Number.POSITIVE_INFINITY };
+      return { status: "retryable", scope: "provider", reason: "provider_not_configured", retryAt: Number.POSITIVE_INFINITY };
     }
 
     const model = this.modelById(offer.modelId);
@@ -214,7 +213,7 @@ export class OpenAICompatibleProvider implements Provider {
           authorization: `Bearer ${apiKey}`,
           "content-type": "application/json",
           accept: stream ? "text/event-stream, application/json" : "application/json",
-          "user-agent": "ai-relay/0.2",
+          "user-agent": "ai-relay/1.0",
         },
         body: JSON.stringify(upstreamBody),
         signal,
@@ -224,6 +223,7 @@ export class OpenAICompatibleProvider implements Provider {
       const retryAt = this.blockProvider(this.defaultRetryMs, Date.now());
       return {
         status: "retryable",
+        scope: "provider",
         reason: error instanceof Error ? `network:${error.message}` : "network_error",
         retryAt,
       };
@@ -251,6 +251,7 @@ export class OpenAICompatibleProvider implements Provider {
     if (response.status === 429) {
       return {
         status: "retryable",
+        scope: "model",
         reason: "rate_limit",
         retryAt: this.blockModel(model, retryAfterMs, Date.now()),
       };
@@ -258,6 +259,7 @@ export class OpenAICompatibleProvider implements Provider {
     if (response.status === 408 || response.status >= 500) {
       return {
         status: "retryable",
+        scope: "provider",
         reason: `upstream_${response.status}`,
         retryAt: this.blockProvider(retryAfterMs, Date.now()),
       };
@@ -265,8 +267,9 @@ export class OpenAICompatibleProvider implements Provider {
 
     if (response.status === 401 || response.status === 403) {
       this.providerState.blockedUntil = Math.max(this.providerState.blockedUntil, Date.now() + 60_000);
+      return { status: "rejected", scope: "provider", httpStatus: response.status, bodyText };
     }
-    return { status: "rejected", httpStatus: response.status, bodyText };
+    return { status: "rejected", scope: "model", httpStatus: response.status, bodyText };
   }
 
   status(now = Date.now()): ProviderStatus {

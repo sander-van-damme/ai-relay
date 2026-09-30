@@ -42,7 +42,7 @@ The relay core does not know provider transports or provider-specific quota sema
 
 The scheduler only compares one offer per provider, waits when that buys a smaller-capacity model within the optimization cutoff, and fails over when an execution attempt fails.
 
-Provider implementations live under `src/providers/`. The checked-in `config/relay.json` contains only server settings. Secrets stay in the environment.
+Concrete provider implementations live under `src/providers/<provider>/`. Reusable implementation helpers live under `src/providers/shared/`; using them is optional. A provider may use an official SDK, an OpenAI-compatible transport, or its own implementation without changing the scheduler. See `src/providers/README.md` for the provider implementation contract. The checked-in `config/relay.json` contains only server settings. Provider retry/quota rules stay with the provider and secrets stay in the environment.
 
 ## Offer routing
 
@@ -66,7 +66,7 @@ If no offer is available inside the cutoff, the scheduler uses the earliest avai
 
 ## Failure handling and queue fairness
 
-Providers maintain their own health/cooldown state. A network failure or upstream `5xx` temporarily suppresses that provider; `429` cools down the affected model with `Retry-After` support and exponential backoff. This prevents a failed request from immediately selecting the same broken path forever.
+Providers maintain their own health/cooldown state. A network failure or upstream `5xx` temporarily suppresses that provider; `429` cools down the affected model with `Retry-After` support and exponential backoff. Retryable failures are scoped to a provider or model. The scheduler prefers another eligible path after a failure and enforces a finite per-request budget of three retryable failures for the same path, so a permanently broken route cannot keep one request alive forever.
 
 After a failed execution the request keeps its original queue age, but sets a one-shot yield flag. If a younger request is runnable, exactly one younger dispatch may pass before the failed request becomes eligible again. This avoids both extremes: sending a failed request to the back of the queue, or allowing one unstable request to monopolize all dispatches.
 
@@ -113,7 +113,6 @@ There is no relay authentication. The service binds to `127.0.0.1` and is intend
     "host": "127.0.0.1",
     "port": 8787,
     "heartbeatSeconds": 15,
-    "retrySeconds": 5,
     "upstreamTimeoutSeconds": 300,
     "bodyLimitBytes": 10485760
   }

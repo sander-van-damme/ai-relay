@@ -1,15 +1,15 @@
 import { once } from "node:events";
 import type { ServerResponse } from "node:http";
 import { log } from "./log.ts";
-import { createProviders, type Provider, type ProviderOffer } from "./providers/index.ts";
+import { createProviders, type Provider, type ProviderExecutionResult, type ProviderOffer } from "./providers/index.ts";
 import type { RelayConfig, RelayJob } from "./types.ts";
 
-const AUTO_MODELS = new Set(["auto", "relay/auto", "free", "best-free", "best"]);
 const MAX_QUEUE_BYPASSES = 8;
 export const INITIAL_OPTIMIZATION_WAIT_MS = 15_000;
+export const MAX_RETRYABLE_FAILURES_PER_PATH = 3;
 
 export function isAutoModel(model: string): boolean {
-  return AUTO_MODELS.has(model);
+  return model === "auto";
 }
 
 export function optimizationWaitMs(failureCount: number): number {
@@ -72,7 +72,7 @@ export class RelayScheduler {
   private timer?: NodeJS.Timeout;
   private draining = false;
 
-  constructor(config: RelayConfig, providers: readonly Provider[] = createProviders(config.server)) {
+  constructor(config: RelayConfig, providers: readonly Provider[] = createProviders()) {
     this.config = config;
     this.providers = providers;
     this.providerById = new Map(providers.map((provider) => [provider.id, provider]));
@@ -133,22 +133,36 @@ export class RelayScheduler {
     queueMicrotask(() => void this.drain());
   }
 
+  private offers(job: RelayJob, now: number, maxWait: number, avoidLastFailure: boolean): ProviderOffer[] {
+    const requestedModel = isAutoModel(job.requestedModel) ? "auto" : job.requestedModel;
+    const excludedModelIds = new Set(job.excludedModelIds);
+    const lastFailure = avoidLastFailure ? job.lastRetryFailure : undefined;
+    if (lastFailure?.scope === "model") excludedModelIds.add(lastFailure.modelId);
+
+    return this.providers
+      .filter((provider) => !job.excludedProviderIds.has(provider.id))
+      .filter((provider) => !(lastFailure?.scope === "provider" && lastFailure.providerId === provider.id))
+      .map((provider) => provider.getBestOffer({
+        requestedModel,
+        estimatedInputTokens: job.estimatedInputTokens,
+        maxOptimizationWaitMs: maxWait,
+        excludedModelIds,
+      }, now))
+      .filter((offer): offer is ProviderOffer => offer !== null);
+  }
+
   private choice(job: RelayJob, now: number): JobChoice | null {
     const maxWait = optimizationWaitMs(job.failureCount);
-    const requestedModel = isAutoModel(job.requestedModel) ? "auto" : job.requestedModel;
-    const offers = this.providers
-      .map((provider) => ({
-        provider,
-        offer: provider.getBestOffer({
-          requestedModel,
-          estimatedInputTokens: job.estimatedInputTokens,
-          maxOptimizationWaitMs: maxWait,
-          excludedModelIds: job.excludedModelIds,
-        }, now),
-      }))
-      .filter((entry): entry is { provider: Provider; offer: ProviderOffer } => entry.offer !== null);
 
-    const selected = selectOffer(offers.map((entry) => entry.offer), now, maxWait);
+    if (job.lastRetryFailure) {
+      const alternative = selectOffer(this.offers(job, now, maxWait, true), now, maxWait);
+      if (alternative && alternative.availableAt <= now + maxWait) {
+        const provider = this.providerById.get(alternative.providerId);
+        if (provider) return { provider, offer: alternative };
+      }
+    }
+
+    const selected = selectOffer(this.offers(job, now, maxWait, false), now, maxWait);
     if (!selected) return null;
     const provider = this.providerById.get(selected.providerId);
     return provider ? { provider, offer: selected } : null;
@@ -156,9 +170,10 @@ export class RelayScheduler {
 
   private failNoOffer(job: RelayJob): void {
     const models = this.listModels();
-    const eligible = isAutoModel(job.requestedModel)
+    const eligible = (isAutoModel(job.requestedModel)
       ? models.filter((model) => !job.excludedModelIds.has(model.id))
-      : models.filter((model) => model.id === job.requestedModel && !job.excludedModelIds.has(model.id));
+      : models.filter((model) => model.id === job.requestedModel && !job.excludedModelIds.has(model.id)))
+      .filter((model) => !job.excludedProviderIds.has(model.providerId));
     const anyConfigured = this.providers.some((provider) => provider.isConfigured());
     const capacityExists = eligible.some((model) => job.estimatedInputTokens <= model.inputCapacityTokens);
 
@@ -170,9 +185,9 @@ export class RelayScheduler {
     } else if (!capacityExists && eligible.length > 0) {
       code = "request_exceeds_provider_capacity";
       message = "Estimated input tokens exceed every eligible model's effective request capacity.";
-    } else if (eligible.length === 0 && job.excludedModelIds.size > 0) {
-      code = "upstream_rejected";
-      message = "Every eligible model rejected this request.";
+    } else if (eligible.length === 0 && (job.excludedModelIds.size > 0 || job.excludedProviderIds.size > 0)) {
+      code = "upstream_unavailable";
+      message = "Every eligible provider/model path is unavailable, rejected, or exhausted for this request.";
     }
 
     const error = openAiError(code, message);
@@ -199,6 +214,7 @@ export class RelayScheduler {
       }
     }
     job.yieldOnce = false;
+    job.lastRetryFailure = undefined;
 
     log("info", "queue_dispatched", {
       request_id: job.id,
@@ -291,6 +307,30 @@ export class RelayScheduler {
     job.stream ? finishStreamError(job.response, error) : finishJson(job.response, error);
   }
 
+  private retryFailureKey(scope: "provider" | "model", providerId: string, modelId: string): string {
+    return scope === "provider" ? `provider:${providerId}` : `model:${modelId}`;
+  }
+
+  private recordRetryableFailure(
+    job: RelayJob,
+    provider: Provider,
+    offer: ProviderOffer,
+    result: Extract<ProviderExecutionResult, { status: "retryable" }>,
+  ): number {
+    const key = this.retryFailureKey(result.scope, provider.id, offer.modelId);
+    const count = (job.retryableFailureCounts.get(key) ?? 0) + 1;
+    job.retryableFailureCounts.set(key, count);
+
+    if (count >= MAX_RETRYABLE_FAILURES_PER_PATH) {
+      if (result.scope === "provider") job.excludedProviderIds.add(provider.id);
+      else job.excludedModelIds.add(offer.modelId);
+      job.lastRetryFailure = undefined;
+    } else {
+      job.lastRetryFailure = { scope: result.scope, providerId: provider.id, modelId: offer.modelId };
+    }
+    return count;
+  }
+
   private async execute(job: RelayJob, provider: Provider, offer: ProviderOffer): Promise<void> {
     if (job.cancelled) return;
 
@@ -318,11 +358,15 @@ export class RelayScheduler {
     }
 
     if (result.status === "retryable") {
+      const retryCount = this.recordRetryableFailure(job, provider, offer, result);
       log("warn", "provider_retryable_failure", {
         request_id: job.id,
         relay_model: offer.modelId,
         provider: provider.id,
+        scope: result.scope,
         reason: result.reason,
+        retry_count: retryCount,
+        retry_budget: MAX_RETRYABLE_FAILURES_PER_PATH,
         retry_at: Number.isFinite(result.retryAt) ? new Date(result.retryAt).toISOString() : null,
       });
       this.markFailureAndRequeue(job);
@@ -334,10 +378,13 @@ export class RelayScheduler {
         request_id: job.id,
         relay_model: offer.modelId,
         provider: provider.id,
+        scope: result.scope,
         status: result.httpStatus,
       });
       if (isAutoModel(job.requestedModel)) {
-        job.excludedModelIds.add(offer.modelId);
+        if (result.scope === "provider") job.excludedProviderIds.add(provider.id);
+        else job.excludedModelIds.add(offer.modelId);
+        job.lastRetryFailure = undefined;
         this.markFailureAndRequeue(job);
       } else {
         this.terminalForJob(job, result.httpStatus, result.bodyText);

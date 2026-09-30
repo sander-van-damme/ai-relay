@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import type { QuotaPolicy } from "../src/quota.ts";
-import { OpenAICompatibleProvider } from "../src/providers/openai-compatible.ts";
+import type { QuotaPolicy } from "../src/providers/shared/quota.ts";
+import { OpenAICompatibleProvider } from "../src/providers/shared/openai-compatible.ts";
 
 function policy(tpm: number): QuotaPolicy {
   return {
@@ -75,9 +75,28 @@ test("network failure puts the provider behind a cooldown", async () => {
     const offer = p.getBestOffer(autoRequest, now)!;
     const result = await p.execute(offer, { messages: [] }, false, 50, new AbortController().signal);
     assert.equal(result.status, "retryable");
+    if (result.status === "retryable") assert.equal(result.scope, "provider");
     const next = p.getBestOffer(autoRequest, now + 1);
     assert.ok(next);
     assert.ok((next?.availableAt ?? 0) >= now + 15_000);
+  } finally {
+    globalThis.fetch = originalFetch;
+    if (originalKey === undefined) delete process.env.TEST_PROVIDER_KEY;
+    else process.env.TEST_PROVIDER_KEY = originalKey;
+  }
+});
+
+test("authentication rejection is provider-scoped", async () => {
+  const originalKey = process.env.TEST_PROVIDER_KEY;
+  const originalFetch = globalThis.fetch;
+  process.env.TEST_PROVIDER_KEY = "test";
+  globalThis.fetch = async () => new Response('{"error":"bad key"}', { status: 401 });
+  try {
+    const p = provider();
+    const offer = p.getBestOffer(autoRequest, Date.now())!;
+    const result = await p.execute(offer, { messages: [] }, false, 50, new AbortController().signal);
+    assert.equal(result.status, "rejected");
+    if (result.status === "rejected") assert.equal(result.scope, "provider");
   } finally {
     globalThis.fetch = originalFetch;
     if (originalKey === undefined) delete process.env.TEST_PROVIDER_KEY;
