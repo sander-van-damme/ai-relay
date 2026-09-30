@@ -39,7 +39,6 @@ The count must reflect the actual request representation seen by that model, inc
 
 Providers may cache token counts per request/model so repeated standard/overflow evaluation does not repeat expensive tokenization or network calls. A failed count must not be cached permanently when a later retry could succeed.
 
-The current Google provider uses the official `@google/genai` `countTokens` API for counting while generation still uses Google's OpenAI-compatible transport. The current NVIDIA GPT-OSS provider uses the model's `o200k_harmony` tokenizer locally.
 
 ## Offer selection
 
@@ -66,36 +65,25 @@ The scheduler requests offers in two modes:
 
 A provider must return the same kind in `ProviderOffer.kind` that was requested through `OfferRequest.offerKind`.
 
-Overflow offers are a relay-side speculative behavior, not a capability that an upstream provider is expected to support or document. They should only be enabled for a concrete provider and quota dimension when we have empirical reason to suspect that the upstream may sometimes accept requests beyond the limit we normally track. Do not enable overflow merely because another provider has shown similar behavior.
+Overflow offers are a relay-side speculative behavior, not a capability that an upstream provider is expected to support or document. They should only be implemented when observation or testing gives us reason to suspect that an upstream may sometimes accept requests beyond a limit that would normally block the request. Do not infer overflow behavior from another provider, model, account, or limit.
 
-An overflow offer may only relax quota dimensions that the relay implementation has explicitly marked as overflow-eligible based on such observations. It must never ignore:
+The provider contract does not globally define which kinds of limits may or may not be overflowed. A concrete provider may implement overflow for any specific constraint where observed upstream behavior justifies doing so, including request, token, rate, capacity, context, concurrency, spacing, or other limits. The exact scope and behavior are provider-specific.
 
-- model context/input capacity;
-- a hard single-request token ceiling;
-- concurrency limits;
-- minimum request spacing;
-- provider/model health cooldowns;
-- quota dimensions that were not explicitly marked as overflow-eligible by the relay.
+An overflow offer may relax only the constraints that the concrete provider implementation has deliberately made overflowable. All other constraints continue to apply normally. This is an implementation decision based on observed behavior, not a claim that the upstream publicly supports or guarantees exceeding that limit.
 
-For example, the current Google integration may use speculative overflow for requests-per-day because observed behavior has sometimes allowed requests beyond the nominal daily limit. This is not a public or documented Google capability, and it must not be treated as guaranteed behavior. RPM and TPM exhaustion continue to behave as normal queueing constraints.
-
-Capacity rules still apply during overflow selection. For a 200,000-token request, a 16,000-token model is never eligible, while an otherwise quota-exhausted model with at least 200,000 tokens of effective request capacity may be eligible for an overflow offer.
-
-A provider should only expose an overflow offer when the request would otherwise be delayed specifically by a quota dimension that the relay has marked as overflow-eligible. It should not expose speculative offers while the same model is normally available.
+A provider should only expose an overflow offer when the request would otherwise be blocked or delayed by a constraint that its overflow implementation is specifically prepared to probe. It should not expose speculative offers while the same request is normally available.
 
 The scheduler always prefers a standard offer that is usable inside its optimization window. Only when no such standard offer exists does it ask providers for overflow offers. If no overflow offer is available, the scheduler returns to the earliest standard offer and keeps the request queued.
 
-### Learning a hard quota cap
+### Learning an overflow boundary
 
-A failed speculative attempt can provide stronger evidence than the local quota model.
+A failed speculative attempt can provide stronger evidence than the provider's local model of an upstream limit.
 
-When an overflow request receives a provider quota response such as HTTP `429`, the provider may remember that the attempted model has reached a hard cap and temporarily stop advertising overflow for that model.
+When an overflow attempt receives a response that clearly shows the probed limit was reached, the provider may remember that observation and temporarily stop advertising equivalent overflow attempts for that model or constraint.
 
-The hard-cap observation TTL is provider-defined. The current Google/OpenAI-compatible implementation uses 24 hours. Its cache is process-local and only suppresses overflow offers; normal offers still become available at their usual quota reset time.
+How such observations are classified, scoped and expired is provider-defined. Failures that do not establish that the probed limit caused the rejection, such as unrelated network failures, timeouts or upstream `5xx` responses, must not be treated as evidence of an overflow boundary.
 
-Network failures, timeouts and `5xx` responses must not mark the quota as a hard cap because they do not prove that the quota caused the failure.
-
-A successful overflow request does not mark the model as capped. If its normal quota remains exhausted, the provider may offer another speculative attempt later.
+A successful overflow request does not establish a new guaranteed limit. The provider may continue making speculative overflow offers according to its own implementation and observations.
 
 For `auto` routing, a model-scoped overflow failure should return to the scheduler rather than starting a hidden retry loop inside `execute()`. The scheduler can ask the provider for another overflow offer with the failed model excluded, allowing the provider to return its next eligible model. This keeps each upstream attempt visible to queue fairness, retry budgets and logging.
 
@@ -149,9 +137,9 @@ A provider is incomplete until tests cover at least:
 9. Explicit model selection stays on the requested model.
 10. `auto` returns the provider's best valid offer according to that provider's rules.
 11. Standard offers are preferred over overflow offers.
-12. Overflow never exceeds hard request capacity or non-opted-in quota dimensions.
-13. A quota rejection from an overflow attempt suppresses repeated probes for the provider-defined hard-cap TTL.
-14. Network/`5xx` failures do not incorrectly create a hard-cap observation.
+12. Overflow relaxes only the constraints that the concrete provider has explicitly implemented as overflowable, while all other provider constraints continue to apply.
+13. A rejection that clearly identifies the probed overflow boundary can suppress equivalent speculative probes according to provider-defined behavior.
+14. Unrelated failures such as network errors, timeouts or `5xx` responses do not incorrectly create an overflow-boundary observation.
 15. Token counting is model-specific and no provider-independent estimate is used.
 16. The exact token count on the selected offer is reused for quota accounting and execution.
 17. Repeated offer evaluation reuses a cached successful token count when appropriate.
@@ -162,4 +150,3 @@ A new provider should normally require changes only under `src/providers/`, regi
 
 If adding a provider requires `if (provider === ...)` logic in `relay.ts`, reconsider the provider interface first.
 
-Google currently uses `@google/genai` for authoritative token counting. A later migration of generation itself to the native Google SDK should remain entirely inside the Google provider so provider-native functionality does not leak into the scheduler.
