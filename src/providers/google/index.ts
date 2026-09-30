@@ -1,5 +1,6 @@
 import type { QuotaPolicy } from "../shared/quota.ts";
 import { OpenAICompatibleProvider, type ManagedModel } from "../shared/openai-compatible.ts";
+import { countGoogleInputTokens } from "./token-count.ts";
 
 const GOOGLE_DAY = { type: "calendar-day", timeZone: "America/Los_Angeles" } as const;
 const DEFAULT_RETRY_MS = 5_000;
@@ -86,6 +87,7 @@ export function createGoogleProvider(): OpenAICompatibleProvider {
     baseUrl: "https://generativelanguage.googleapis.com/v1beta/openai",
     defaultRetryMs: DEFAULT_RETRY_MS,
     providerFailureCooldownMs: PROVIDER_FAILURE_COOLDOWN_MS,
+    countInputTokens: countGoogleInputTokens,
     overflowProbe: {
       hardCapTtlMs: OVERFLOW_HARD_CAP_TTL_MS,
       limits: ["requestsPerDay"],

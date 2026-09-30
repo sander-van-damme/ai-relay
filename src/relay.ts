@@ -98,7 +98,6 @@ export class RelayScheduler {
       request_id: job.id,
       requested_model: job.requestedModel,
       stream: job.stream,
-      estimated_input_tokens: job.estimatedInputTokens,
       queue_depth: this.queue.length,
     });
     this.triggerDrain();
@@ -142,40 +141,54 @@ export class RelayScheduler {
     queueMicrotask(() => void this.drain());
   }
 
-  private offers(
+  private async offers(
     job: RelayJob,
     now: number,
     maxWait: number,
     avoidLastFailure: boolean,
     offerKind: ProviderOfferKind,
-  ): ProviderOffer[] {
+  ): Promise<ProviderOffer[]> {
     const requestedModel = isAutoModel(job.requestedModel) ? "auto" : job.requestedModel;
     const excludedModelIds = new Set(job.excludedModelIds);
     const lastFailure = avoidLastFailure ? job.lastRetryFailure : undefined;
     if (lastFailure?.scope === "model") excludedModelIds.add(lastFailure.modelId);
 
-    return this.providers
+    const providers = this.providers
       .filter((provider) => !job.excludedProviderIds.has(provider.id))
-      .filter((provider) => !(lastFailure?.scope === "provider" && lastFailure.providerId === provider.id))
-      .map((provider) => provider.getBestOffer({
-        offerKind,
-        requestedModel,
-        estimatedInputTokens: job.estimatedInputTokens,
-        maxOptimizationWaitMs: maxWait,
-        excludedModelIds,
-      }, now))
-      .filter((offer): offer is ProviderOffer => offer !== null);
+      .filter((provider) => !(lastFailure?.scope === "provider" && lastFailure.providerId === provider.id));
+
+    const offers = await Promise.all(providers.map(async (provider) => {
+      try {
+        return await provider.getBestOffer({
+          offerKind,
+          body: job.body,
+          requestedModel,
+          maxOptimizationWaitMs: maxWait,
+          excludedModelIds,
+        }, now);
+      } catch (error) {
+        log("warn", "provider_offer_error", {
+          request_id: job.id,
+          provider: provider.id,
+          offer_kind: offerKind,
+          error: error instanceof Error ? error.message : String(error),
+        });
+        return null;
+      }
+    }));
+
+    return offers.filter((offer): offer is ProviderOffer => offer !== null);
   }
 
-  private choice(job: RelayJob, now: number): JobChoice | null {
+  private async choice(job: RelayJob, now: number): Promise<JobChoice | null> {
     const maxWait = optimizationWaitMs(job.failureCount);
     const withinStandardWindow = (offer: ProviderOffer): boolean =>
-      offer.availableAt <= now + maxWait;
+      offer.availableAt <= Date.now() + maxWait;
 
     if (job.lastRetryFailure) {
       const standardAlternative = selectOffer(
-        this.offers(job, now, maxWait, true, "standard"),
-        now,
+        await this.offers(job, now, maxWait, true, "standard"),
+        Date.now(),
         maxWait,
       );
       if (standardAlternative && withinStandardWindow(standardAlternative)) {
@@ -185,8 +198,8 @@ export class RelayScheduler {
     }
 
     const standard = selectOffer(
-      this.offers(job, now, maxWait, false, "standard"),
-      now,
+      await this.offers(job, now, maxWait, false, "standard"),
+      Date.now(),
       maxWait,
     );
     if (standard && withinStandardWindow(standard)) {
@@ -196,22 +209,22 @@ export class RelayScheduler {
 
     if (job.lastRetryFailure) {
       const overflowAlternative = selectOffer(
-        this.offers(job, now, 0, true, "overflow"),
-        now,
+        await this.offers(job, now, 0, true, "overflow"),
+        Date.now(),
         0,
       );
-      if (overflowAlternative && overflowAlternative.availableAt <= now) {
+      if (overflowAlternative && overflowAlternative.availableAt <= Date.now()) {
         const provider = this.providerById.get(overflowAlternative.providerId);
         if (provider) return { provider, offer: overflowAlternative };
       }
     }
 
     const overflow = selectOffer(
-      this.offers(job, now, 0, false, "overflow"),
-      now,
+      await this.offers(job, now, 0, false, "overflow"),
+      Date.now(),
       0,
     );
-    if (overflow && overflow.availableAt <= now) {
+    if (overflow && overflow.availableAt <= Date.now()) {
       const provider = this.providerById.get(overflow.providerId);
       if (provider) return { provider, offer: overflow };
     }
@@ -221,23 +234,36 @@ export class RelayScheduler {
     return provider ? { provider, offer: standard } : null;
   }
 
-  private failNoOffer(job: RelayJob): void {
+  private async failNoOffer(job: RelayJob): Promise<void> {
     const models = this.listModels();
     const eligible = (isAutoModel(job.requestedModel)
       ? models.filter((model) => !job.excludedModelIds.has(model.id))
       : models.filter((model) => model.id === job.requestedModel && !job.excludedModelIds.has(model.id)))
       .filter((model) => !job.excludedProviderIds.has(model.providerId));
     const anyConfigured = this.providers.some((provider) => provider.isConfigured());
-    const capacityExists = eligible.some((model) => job.estimatedInputTokens <= model.inputCapacityTokens);
+
+    const configuredEligible = eligible.filter((model) => this.providerById.get(model.providerId)?.isConfigured());
+    const capacityChecks = await Promise.all(configuredEligible.map(async (model): Promise<boolean | null> => {
+      const provider = this.providerById.get(model.providerId);
+      if (!provider) return null;
+      try {
+        const inputTokens = await provider.countInputTokens(job.body, model.id);
+        return inputTokens <= model.inputCapacityTokens;
+      } catch {
+        return null;
+      }
+    }));
+    const allCapacityChecksKnown = capacityChecks.length > 0 && capacityChecks.every((result) => result !== null);
+    const capacityExists = capacityChecks.some((result) => result === true);
 
     let code = "model_unavailable";
     let message = "No provider can currently handle this request.";
     if (!anyConfigured) {
       code = "provider_not_configured";
       message = "No configured provider API key is available.";
-    } else if (!capacityExists && eligible.length > 0) {
+    } else if (allCapacityChecksKnown && !capacityExists) {
       code = "request_exceeds_provider_capacity";
-      message = "Estimated input tokens exceed every eligible model's effective request capacity.";
+      message = "Exact input token counts exceed every eligible model's effective request capacity.";
     } else if (eligible.length === 0 && (job.excludedModelIds.size > 0 || job.excludedProviderIds.size > 0)) {
       code = "upstream_unavailable";
       message = "Every eligible provider/model path is unavailable, rejected, or exhausted for this request.";
@@ -274,6 +300,7 @@ export class RelayScheduler {
       relay_model: choice.offer.modelId,
       provider: choice.offer.providerId,
       offer_kind: choice.offer.kind,
+      input_tokens: choice.offer.inputTokens,
       queue_ms: now - job.enqueuedAt,
       queue_bypasses: job.bypassCount,
       failure_count: job.failureCount,
@@ -315,21 +342,36 @@ export class RelayScheduler {
         for (let index = 0; index < this.queue.length; index += 1) {
           const job = this.queue[index];
           if (!job) continue;
-          const choice = this.choice(job, now);
+          const choice = await this.choice(job, now);
+          const currentIndex = this.queue.indexOf(job);
+          if (currentIndex < 0) {
+            changed = true;
+            break;
+          }
+          if (currentIndex !== index) {
+            changed = true;
+            break;
+          }
+          if (job.cancelled) {
+            this.queue.splice(index, 1);
+            changed = true;
+            break;
+          }
           if (!choice) {
             this.queue.splice(index, 1);
-            this.failNoOffer(job);
+            await this.failNoOffer(job);
             changed = true;
             break;
           }
 
-          const delayMs = choice.offer.availableAt - now;
+          const decisionNow = Date.now();
+          const delayMs = choice.offer.availableAt - decisionNow;
           if (delayMs <= 0) {
             if (job.yieldOnce) {
               firstYieldingReady ??= { index, choice };
               continue;
             }
-            this.dispatch(index, choice, now);
+            this.dispatch(index, choice, decisionNow);
             changed = true;
             break;
           }
@@ -340,7 +382,7 @@ export class RelayScheduler {
 
         if (changed) continue;
         if (firstYieldingReady) {
-          this.dispatch(firstYieldingReady.index, firstYieldingReady.choice, now);
+          this.dispatch(firstYieldingReady.index, firstYieldingReady.choice, Date.now());
           continue;
         }
         if (Number.isFinite(nextWakeMs)) this.triggerDrain(nextWakeMs);
@@ -401,7 +443,6 @@ export class RelayScheduler {
       offer,
       job.body,
       job.stream,
-      job.estimatedInputTokens,
       controller.signal,
     );
     clearTimeout(timeout);
@@ -453,6 +494,7 @@ export class RelayScheduler {
       relay_model: offer.modelId,
       provider: provider.id,
       offer_kind: offer.kind,
+      input_tokens: offer.inputTokens,
       status: result.response.status,
       connect_ms: Date.now() - startedAt,
     });

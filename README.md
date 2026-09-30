@@ -46,11 +46,13 @@ Concrete provider implementations live under `src/providers/<provider>/`. Reusab
 
 ## Offer routing
 
-For `"model": "auto"`, each provider receives the estimated input size and returns at most one offer for the requested offer kind:
+For `"model": "auto"`, each provider counts the request with the concrete candidate model's own tokenizer or authoritative provider-native counting mechanism and returns at most one offer for the requested offer kind. The relay does not use a provider-independent token estimate.
 
 ```text
-kind + provider + model + effective input capacity + available-at time
+kind + provider + model + exact input tokens + effective input capacity + available-at time
 ```
+
+Token counting is asynchronous at the provider boundary so a provider can use either a fast local tokenizer or an official counting API. The selected offer carries the authoritative input token count, and execution reuses that same value for quota accounting.
 
 The scheduler asks for `standard` offers first. Providers may optionally expose an `overflow` offer as a speculative last resort when their own tracked quota says a request should wait.
 

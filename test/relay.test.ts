@@ -39,10 +39,9 @@ function config(): RelayConfig {
 function job(id: string, response: FakeResponse): RelayJob {
   return {
     id,
-    body: { model: "auto", testId: id, messages: [] },
+    body: { model: "auto", testId: id, messages: [], testInputTokens: 10 },
     response: response as never,
     enqueuedAt: Date.now(),
-    estimatedInputTokens: 10,
     requestedModel: "auto",
     stream: false,
     excludedModelIds: new Set<string>(),
@@ -80,15 +79,21 @@ class FakeProvider implements Provider {
   listModels(): readonly ProviderModelInfo[] {
     return [{ id: `${this.id}/model`, providerId: this.id, inputCapacityTokens: this.capacity }];
   }
-  getBestOffer(request: OfferRequest, now = Date.now()): ProviderOffer | null {
+  async countInputTokens(body: ChatCompletionRequest, modelId: string): Promise<number> {
+    if (modelId !== `${this.id}/model`) throw new Error(`Unknown model: ${modelId}`);
+    return Number(body.testInputTokens ?? 10);
+  }
+  async getBestOffer(request: OfferRequest, now = Date.now()): Promise<ProviderOffer | null> {
     if (request.offerKind === "overflow" && !this.supportsOverflow) return null;
     if (request.requestedModel !== "auto" && request.requestedModel !== `${this.id}/model`) return null;
-    if (request.excludedModelIds.has(`${this.id}/model`) || request.estimatedInputTokens > this.capacity) return null;
+    const inputTokens = await this.countInputTokens(request.body, `${this.id}/model`);
+    if (request.excludedModelIds.has(`${this.id}/model`) || inputTokens > this.capacity) return null;
     return {
       kind: request.offerKind,
       providerId: this.id,
       providerPriority: this.priority,
       modelId: `${this.id}/model`,
+      inputTokens,
       inputCapacityTokens: this.capacity,
       availableAt: request.offerKind === "overflow"
         ? now
@@ -101,7 +106,6 @@ class FakeProvider implements Provider {
     offer: ProviderOffer,
     body: ChatCompletionRequest,
     _stream: boolean,
-    _estimatedInputTokens: number,
     _signal: AbortSignal,
   ): Promise<ProviderExecutionResult> {
     const id = String(body.testId);
@@ -134,8 +138,8 @@ test("optimization wait halves after every failed execution", () => {
 
 test("offer selection waits up to cutoff for smaller capacity", () => {
   const now = 1_000_000;
-  const small: ProviderOffer = { kind: "standard", providerId: "google", providerPriority: 10, modelId: "small", inputCapacityTokens: 16_000, availableAt: now + 12_000 };
-  const large: ProviderOffer = { kind: "standard", providerId: "nvidia", providerPriority: 20, modelId: "large", inputCapacityTokens: 32_000, availableAt: now };
+  const small: ProviderOffer = { kind: "standard", providerId: "google", providerPriority: 10, modelId: "small", inputTokens: 100, inputCapacityTokens: 16_000, availableAt: now + 12_000 };
+  const large: ProviderOffer = { kind: "standard", providerId: "nvidia", providerPriority: 20, modelId: "large", inputTokens: 100, inputCapacityTokens: 32_000, availableAt: now };
   assert.equal(selectOffer([small, large], now, 15_000)?.modelId, "small");
   assert.equal(selectOffer([{ ...small, availableAt: now + 30_000 }, large], now, 15_000)?.modelId, "large");
 });
