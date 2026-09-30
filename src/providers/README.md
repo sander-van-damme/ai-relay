@@ -66,9 +66,9 @@ The scheduler requests offers in two modes:
 
 A provider must return the same kind in `ProviderOffer.kind` that was requested through `OfferRequest.offerKind`.
 
-Overflow support is optional and provider-specific. Do not assume that an upstream accepts requests beyond a documented quota simply because another provider sometimes does.
+Overflow offers are a relay-side speculative behavior, not a capability that an upstream provider is expected to support or document. They should only be enabled for a concrete provider and quota dimension when we have empirical reason to suspect that the upstream may sometimes accept requests beyond the limit we normally track. Do not enable overflow merely because another provider has shown similar behavior.
 
-An overflow offer may only relax quota dimensions that the concrete provider has explicitly opted into. It must never ignore:
+An overflow offer may only relax quota dimensions that the relay implementation has explicitly marked as overflow-eligible based on such observations. It must never ignore:
 
 - model context/input capacity;
 - a hard single-request token ceiling;
@@ -77,7 +77,7 @@ An overflow offer may only relax quota dimensions that the concrete provider has
 - provider/model health cooldowns;
 - quota dimensions that were not explicitly marked as overflowable.
 
-For example, the current Google provider allows speculative overflow for requests-per-day only. RPM and TPM exhaustion continue to behave as normal queueing constraints.
+For example, the current Google integration may use speculative overflow for requests-per-day because observed behavior has sometimes allowed requests beyond the nominal daily limit. This is not a public or documented Google capability, and it must not be treated as guaranteed behavior. RPM and TPM exhaustion continue to behave as normal queueing constraints.
 
 Capacity rules still apply during overflow selection. For a 200,000-token request, a 16,000-token model is never eligible, while an otherwise quota-exhausted model with at least 200,000 tokens of effective request capacity may be eligible for an overflow offer.
 
