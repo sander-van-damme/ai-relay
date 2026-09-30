@@ -76,14 +76,6 @@ After a failed execution the request keeps its original queue age, but sets a on
 
 The existing work-conserving queue behavior remains: blocked requests may be bypassed so usable quota is not wasted, with a starvation barrier after repeated bypasses.
 
-## Google quotas
-
-The Google provider currently includes the free-tier text models and limits used by this relay project. Google RPD accounting resets at midnight in `America/Los_Angeles`, rather than using a rolling 24-hour window.
-
-Google also opts into speculative overflow probing for requests-per-day. This is considered only when no standard offer is usable inside the normal scheduler window. RPM, TPM, request capacity, concurrency and health cooldowns remain normal constraints. If an overflow attempt receives HTTP `429`, overflow for that model is suppressed for 24 hours while its normal quota-reset offer remains available.
-
-The model catalog includes the two Gemma 4 text models plus the verified Gemini Flash/Flash-Lite models currently used by the relay. The catalog is intentionally code-owned so provider-specific quota/reset behavior can evolve without adding generic JSON configuration fields.
-
 ## API
 
 AI Relay implements:
