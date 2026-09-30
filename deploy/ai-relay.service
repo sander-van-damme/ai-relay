@@ -1,0 +1,28 @@
+[Unit]
+Description=AI Relay
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ai-relay
+Group=ai-relay
+WorkingDirectory=/opt/ai-relay
+EnvironmentFile=/etc/ai-relay.env
+Environment=AI_RELAY_CONFIG=/etc/ai-relay/models.json
+ExecStart=/usr/bin/node /opt/ai-relay/src/index.ts
+Restart=always
+RestartSec=3
+TimeoutStopSec=15
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+
+[Install]
+WantedBy=multi-user.target
