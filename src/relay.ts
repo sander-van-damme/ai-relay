@@ -343,9 +343,9 @@ export class RelayScheduler {
         this.terminalForJob(job, result.httpStatus, result.bodyText);
       }
       return;
-  }
+    }
 
-   log("info", "upstream_response", {
+    log("info", "upstream_response", {
       request_id: job.id,
       relay_model: offer.modelId,
       provider: provider.id,
