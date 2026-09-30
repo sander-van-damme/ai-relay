@@ -1,3 +1,5 @@
+export type QuotaLimitName = "requestsPerMinute" | "inputTokensPerMinute" | "requestsPerDay";
+
 export interface QuotaLimits {
   requestsPerMinute: number | null;
   inputTokensPerMinute: number | null;
@@ -159,6 +161,37 @@ export function quotaDelayMs(policy: QuotaPolicy, state: QuotaRuntimeState, inpu
     waitForDailyWindow(state.events, now, policy.limits.requestsPerDay, policy.dailyWindow),
     waitForTokenWindow(state.events, now, inputTokens, policy.limits.inputTokensPerMinute),
   );
+}
+
+export function quotaCanOverflow(
+  policy: QuotaPolicy,
+  state: QuotaRuntimeState,
+  inputTokens: number,
+  overflowLimits: ReadonlySet<QuotaLimitName>,
+  contextWindowTokens = Number.POSITIVE_INFINITY,
+  now = Date.now(),
+): boolean {
+  if (!quotaCanEverHandle(policy, inputTokens, contextWindowTokens)) return false;
+  if (policy.maxConcurrent !== null && state.active >= policy.maxConcurrent) return false;
+
+  state.events = pruneQuotaEvents(state.events, now, policy.dailyWindow);
+
+  if (state.blockedUntil > now) return false;
+  if (state.lastStartedAt + policy.limits.minimumSpacingMs > now) return false;
+
+  const waits: Record<QuotaLimitName, number> = {
+    requestsPerMinute: waitForRequestWindow(state.events, now, MINUTE_MS, policy.limits.requestsPerMinute),
+    inputTokensPerMinute: waitForTokenWindow(state.events, now, inputTokens, policy.limits.inputTokensPerMinute),
+    requestsPerDay: waitForDailyWindow(state.events, now, policy.limits.requestsPerDay, policy.dailyWindow),
+  };
+
+  let overflowNeeded = false;
+  for (const [limit, waitMs] of Object.entries(waits) as Array<[QuotaLimitName, number]>) {
+    if (waitMs <= 0) continue;
+    if (!Number.isFinite(waitMs) || !overflowLimits.has(limit)) return false;
+    overflowNeeded = true;
+  }
+  return overflowNeeded;
 }
 
 export function reserveQuota(policy: QuotaPolicy, state: QuotaRuntimeState, inputTokens: number, now = Date.now()): void {

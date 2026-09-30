@@ -46,11 +46,13 @@ Concrete provider implementations live under `src/providers/<provider>/`. Reusab
 
 ## Offer routing
 
-For `"model": "auto"`, each provider receives the estimated input size and returns at most one offer:
+For `"model": "auto"`, each provider receives the estimated input size and returns at most one offer for the requested offer kind:
 
 ```text
-provider + model + effective input capacity + available-at time
+kind + provider + model + effective input capacity + available-at time
 ```
+
+The scheduler asks for `standard` offers first. Providers may optionally expose an `overflow` offer as a speculative last resort when their own tracked quota says a request should wait.
 
 Effective single-request capacity is the smaller of the model context limit and its configured TPM limit. This prevents a request from being routed to a model whose context is large enough but whose per-minute quota can never admit that request.
 
@@ -62,7 +64,7 @@ The initial optimization wait is 15 seconds. Every failed execution halves it:
 15s -> 7.5s -> 3.75s -> 1.875s -> ...
 ```
 
-If no offer is available inside the cutoff, the scheduler uses the earliest available offer. A request waiting only on quota stays queued rather than failing.
+If no standard offer is usable inside the cutoff, the scheduler checks for immediate overflow offers. If none is available, it uses the earliest standard offer and keeps the request queued rather than failing.
 
 ## Failure handling and queue fairness
 
@@ -75,6 +77,8 @@ The existing work-conserving queue behavior remains: blocked requests may be byp
 ## Google quotas
 
 The Google provider currently includes the free-tier text models and limits used by this relay project. Google RPD accounting resets at midnight in `America/Los_Angeles`, rather than using a rolling 24-hour window.
+
+Google also opts into speculative overflow probing for requests-per-day. This is considered only when no standard offer is usable inside the normal scheduler window. RPM, TPM, request capacity, concurrency and health cooldowns remain normal constraints. If an overflow attempt receives HTTP `429`, overflow for that model is suppressed for 24 hours while its normal quota-reset offer remains available.
 
 The model catalog includes the two Gemma 4 text models plus the verified Gemini Flash/Flash-Lite models currently used by the relay. The catalog is intentionally code-owned so provider-specific quota/reset behavior can evolve without adding generic JSON configuration fields.
 

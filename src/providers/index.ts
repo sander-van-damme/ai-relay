@@ -6,4 +6,13 @@ export function createProviders(): Provider[] {
   return [createGoogleProvider(), createNvidiaProvider()];
 }
 
-export type { OfferRequest, Provider, ProviderExecutionResult, ProviderFailureScope, ProviderModelInfo, ProviderOffer, ProviderStatus } from "./shared/types.ts";
+export type {
+  OfferRequest,
+  Provider,
+  ProviderExecutionResult,
+  ProviderFailureScope,
+  ProviderModelInfo,
+  ProviderOffer,
+  ProviderOfferKind,
+  ProviderStatus,
+} from "./shared/types.ts";
