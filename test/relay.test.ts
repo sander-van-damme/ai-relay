@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import test from "node:test";
-import { optimizationWaitMs, RelayScheduler, selectOffer } from "../src/relay.ts";
+import { MAX_RETRYABLE_FAILURES_PER_PATH, optimizationWaitMs, RelayScheduler, selectOffer } from "../src/relay.ts";
 import type {
   OfferRequest,
   Provider,
@@ -9,7 +9,7 @@ import type {
   ProviderModelInfo,
   ProviderOffer,
   ProviderStatus,
-} from "../src/providers/types.ts";
+} from "../src/providers/index.ts";
 import type { ChatCompletionRequest, RelayConfig, RelayJob } from "../src/types.ts";
 
 class FakeResponse extends EventEmitter {
@@ -30,7 +30,6 @@ function config(): RelayConfig {
       host: "127.0.0.1",
       port: 8787,
       heartbeatSeconds: 15,
-      retrySeconds: 5,
       upstreamTimeoutSeconds: 300,
       bodyLimitBytes: 1024 * 1024,
     },
@@ -47,6 +46,8 @@ function job(id: string, response: FakeResponse): RelayJob {
     requestedModel: "auto",
     stream: false,
     excludedModelIds: new Set<string>(),
+    excludedProviderIds: new Set<string>(),
+    retryableFailureCounts: new Map<string, number>(),
     cancelled: false,
     bypassCount: 0,
     failureCount: 0,
@@ -55,11 +56,11 @@ function job(id: string, response: FakeResponse): RelayJob {
 }
 
 class FakeProvider implements Provider {
-  readonly credentialEnv = "FAKE_KEY";
   private blockedUntil = 0;
   private active = false;
   readonly executionOrder: string[] = [];
   failFirstFor = new Set<string>();
+  failAlwaysFor = new Set<string>();
   blockOnFailure = true;
 
   readonly id: string;
@@ -99,9 +100,9 @@ class FakeProvider implements Provider {
     this.active = true;
     await new Promise((resolve) => setTimeout(resolve, 0));
     this.active = false;
-    if (this.failFirstFor.delete(id)) {
+    if (this.failFirstFor.delete(id) || this.failAlwaysFor.has(id)) {
       this.blockedUntil = this.blockOnFailure ? Date.now() + 20_000 : 0;
-      return { status: "retryable", reason: "test_failure", retryAt: this.blockedUntil || Date.now() };
+      return { status: "retryable", scope: "provider", reason: "test_failure", retryAt: this.blockedUntil || Date.now() };
     }
     return { status: "success", response: new Response(JSON.stringify({ id, provider: this.id })), release: () => undefined };
   }
@@ -149,6 +150,7 @@ test("retryable provider failure falls through to another provider instead of lo
   const google = new FakeProvider("google", 10, 16_000);
   const nvidia = new FakeProvider("nvidia", 20, 32_000);
   google.failFirstFor.add("A");
+  google.blockOnFailure = false;
   const scheduler = new RelayScheduler(config(), [google, nvidia]);
   const response = new FakeResponse();
   scheduler.enqueue(job("A", response));
@@ -159,4 +161,19 @@ test("retryable provider failure falls through to another provider instead of lo
   assert.deepEqual(nvidia.executionOrder, ["A"]);
   assert.equal(response.writableEnded, true);
   assert.match(response.body, /nvidia/);
+});
+
+test("retryable failures exhaust a finite per-request path budget", async () => {
+  const p = new FakeProvider("only", 10, 32_000);
+  p.failAlwaysFor.add("A");
+  p.blockOnFailure = false;
+  const scheduler = new RelayScheduler(config(), [p]);
+  const response = new FakeResponse();
+  scheduler.enqueue(job("A", response));
+
+  await new Promise((resolve) => setTimeout(resolve, 50));
+
+  assert.equal(p.executionOrder.length, MAX_RETRYABLE_FAILURES_PER_PATH);
+  assert.equal(response.writableEnded, true);
+  assert.match(response.body, /upstream_unavailable/);
 });

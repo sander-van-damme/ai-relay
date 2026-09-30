@@ -3,7 +3,6 @@
     "host": "127.0.0.1",
     "port": 8787,
     "heartbeatSeconds": 15,
-    "retrySeconds": 5,
     "upstreamTimeoutSeconds": 300,
     "bodyLimitBytes": 10485760
   }

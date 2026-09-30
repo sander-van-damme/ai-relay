@@ -1,4 +1,4 @@
-import type { ChatCompletionRequest } from "../types.ts";
+import type { ChatCompletionRequest } from "../../types.ts";
 
 export interface OfferRequest {
   requestedModel: string;
@@ -32,6 +32,8 @@ export interface ProviderStatus {
   }>;
 }
 
+export type ProviderFailureScope = "provider" | "model";
+
 export type ProviderExecutionResult =
   | {
       status: "success";
@@ -40,11 +42,13 @@ export type ProviderExecutionResult =
     }
   | {
       status: "retryable";
+      scope: ProviderFailureScope;
       reason: string;
       retryAt: number;
     }
   | {
       status: "rejected";
+      scope: ProviderFailureScope;
       httpStatus: number;
       bodyText: string;
     };
@@ -52,8 +56,6 @@ export type ProviderExecutionResult =
 export interface Provider {
   readonly id: string;
   readonly priority: number;
-  readonly credentialEnv: string;
-
   isConfigured(): boolean;
   listModels(): readonly ProviderModelInfo[];
   getBestOffer(request: OfferRequest, now?: number): ProviderOffer | null;

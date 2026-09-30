@@ -4,11 +4,11 @@ import {
   calendarDayBounds,
   effectiveInputCapacity,
   emptyQuotaState,
-  estimateInputTokens,
   quotaDelayMs,
   reserveQuota,
   type QuotaPolicy,
-} from "../src/quota.ts";
+} from "../src/providers/shared/quota.ts";
+import { estimateInputTokens } from "../src/request-estimate.ts";
 
 const rolling: QuotaPolicy = {
   maxConcurrent: null,
@@ -26,6 +26,12 @@ test("input token estimate ignores relay model and stream fields", () => {
   const b = estimateInputTokens({ model: "b", stream: false, messages: [{ role: "user", content: "hello" }] });
   assert.equal(a, b);
   assert.ok(a > 0);
+});
+
+test("input token estimate uses UTF-8 bytes", () => {
+  const body = { messages: [{ role: "user", content: "😀😀😀😀" }] };
+  const serialized = JSON.stringify(body);
+  assert.equal(estimateInputTokens(body), Math.ceil(Buffer.byteLength(serialized, "utf8") / 4));
 });
 
 test("effective request capacity is capped by TPM", () => {

@@ -1,8 +1,9 @@
-import type { QuotaPolicy } from "../quota.ts";
-import type { ServerConfig } from "../types.ts";
-import { OpenAICompatibleProvider, type ManagedModel } from "./openai-compatible.ts";
+import type { QuotaPolicy } from "../shared/quota.ts";
+import { OpenAICompatibleProvider, type ManagedModel } from "../shared/openai-compatible.ts";
 
 const GOOGLE_DAY = { type: "calendar-day", timeZone: "America/Los_Angeles" } as const;
+const DEFAULT_RETRY_MS = 5_000;
+const PROVIDER_FAILURE_COOLDOWN_MS = 15_000;
 
 function quota(rpm: number, tpm: number, rpd: number): QuotaPolicy {
   return {
@@ -76,16 +77,14 @@ const GOOGLE_MODELS: readonly ManagedModel[] = [
   },
 ];
 
-export function createGoogleProvider(server: ServerConfig): OpenAICompatibleProvider {
+export function createGoogleProvider(): OpenAICompatibleProvider {
   return new OpenAICompatibleProvider({
     id: "google",
     priority: 10,
     credentialEnv: "GEMINI_API_KEY",
     baseUrl: "https://generativelanguage.googleapis.com/v1beta/openai",
-    defaultRetryMs: server.retrySeconds * 1000,
-    // A provider/network failure should outlive the first 7.5s post-failure
-    // optimization window so the next dispatch naturally tries another provider.
-    providerFailureCooldownMs: 15_000,
+    defaultRetryMs: DEFAULT_RETRY_MS,
+    providerFailureCooldownMs: PROVIDER_FAILURE_COOLDOWN_MS,
     models: GOOGLE_MODELS,
   });
 }
