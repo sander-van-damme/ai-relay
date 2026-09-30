@@ -20,7 +20,7 @@ Never return an offer without applying every known hard constraint. A provider t
 Capacity must account for all hard limits that can make one request impossible, including:
 
 - context/input window limits;
-- provider token-per-request or token-per-minute ceilings when they bound one request;
+- provider token-per-request ceilings, plus token-per-minute ceilings only when they make a single request impossible rather than merely delaying it;
 - account/tier restrictions known to the provider.
 
 A request that can never fit must not produce an offer.
@@ -75,7 +75,7 @@ A failed speculative attempt can provide stronger evidence than the local quota 
 
 When an overflow request receives a provider quota response such as HTTP `429`, the provider may remember that the attempted model has reached a hard cap and temporarily stop advertising overflow for that model.
 
-The current Google/OpenAI-compatible implementation caches that observation for 24 hours. The cache is process-local and only suppresses overflow offers; normal offers still become available at their usual quota reset time.
+The hard-cap observation TTL is provider-defined. The current Google/OpenAI-compatible implementation uses 24 hours. Its cache is process-local and only suppresses overflow offers; normal offers still become available at their usual quota reset time.
 
 Network failures, timeouts and `5xx` responses must not mark the quota as a hard cap because they do not prove that the quota caused the failure.
 
@@ -129,7 +129,7 @@ A provider is incomplete until tests cover at least:
 5. Provider-scoped failures do not get retried through another model on the same provider.
 6. Authentication/configuration errors are not endlessly retried.
 7. Repeated transient failures cannot create an infinite request loop.
-8. Successful execution releases concurrency/quota state.
+8. Successful execution releases concurrency state and records quota usage correctly.
 9. Explicit model selection stays on the requested model.
 10. `auto` returns the provider's best valid offer according to that provider's rules.
 11. Standard offers are preferred over overflow offers.
