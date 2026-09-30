@@ -10,11 +10,23 @@
   "providers": {
     "google": {
       "baseUrl": "https://generativelanguage.googleapis.com/v1beta/openai",
-      "apiKeyEnv": ["GEMINI_API_KEY", "GOOGLE_API_KEY", "GOOGLE_GENERATIVE_AI_API_KEY"]
+      "maxConcurrent": null,
+      "limits": {
+        "requestsPerMinute": null,
+        "inputTokensPerMinute": null,
+        "requestsPerDay": null,
+        "minimumSpacingMs": 0
+      }
     },
     "nvidia": {
       "baseUrl": "https://integrate.api.nvidia.com/v1",
-      "apiKeyEnv": ["NVIDIA_API_KEY"]
+      "maxConcurrent": null,
+      "limits": {
+        "requestsPerMinute": null,
+        "inputTokensPerMinute": null,
+        "requestsPerDay": null,
+        "minimumSpacingMs": 0
+      }
     }
   },
   "models": [
@@ -23,7 +35,7 @@
       "provider": "google",
       "upstreamModel": "gemini-3.8-flash",
       "enabled": true,
-      "maxConcurrent": 1,
+      "maxConcurrent": null,
       "limits": {
         "requestsPerMinute": null,
         "inputTokensPerMinute": null,
@@ -36,7 +48,7 @@
       "provider": "nvidia",
       "upstreamModel": "openai/gpt-oss-120b",
       "enabled": true,
-      "maxConcurrent": 1,
+      "maxConcurrent": null,
       "limits": {
         "requestsPerMinute": null,
         "inputTokensPerMinute": null,

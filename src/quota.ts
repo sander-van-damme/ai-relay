@@ -1,4 +1,4 @@
-import type { ModelConfig, ModelRuntimeState, QuotaEvent } from "./types.ts";
+import type { ModelRuntimeState, QuotaPolicy } from "./types.ts";
 
 const MINUTE_MS = 60_000;
 const DAY_MS = 86_400_000;
@@ -11,13 +11,13 @@ export function estimateInputTokens(body: Record<string, unknown>): number {
   return Math.max(1, Math.ceil(serialized.length / 4));
 }
 
-export function pruneQuotaEvents(events: QuotaEvent[], now: number): QuotaEvent[] {
+export function pruneQuotaEvents(events: ModelRuntimeState["events"], now: number): ModelRuntimeState["events"] {
   const cutoff = now - DAY_MS;
   return events.filter((event) => event.at > cutoff);
 }
 
 function waitForRequestWindow(
-  events: QuotaEvent[],
+  events: ModelRuntimeState["events"],
   now: number,
   windowMs: number,
   limit: number | null,
@@ -32,7 +32,7 @@ function waitForRequestWindow(
 }
 
 function waitForTokenWindow(
-  events: QuotaEvent[],
+  events: ModelRuntimeState["events"],
   now: number,
   inputTokens: number,
   limit: number | null,
@@ -56,21 +56,28 @@ function waitForTokenWindow(
   return Number.POSITIVE_INFINITY;
 }
 
+export function quotaCanEverHandle(policy: QuotaPolicy, inputTokens: number): boolean {
+  return policy.limits.inputTokensPerMinute === null
+    || inputTokens <= policy.limits.inputTokensPerMinute;
+}
+
 export function quotaDelayMs(
-  model: ModelConfig,
+  policy: QuotaPolicy,
   state: ModelRuntimeState,
   inputTokens: number,
   now = Date.now(),
 ): number {
-  if (state.active >= model.maxConcurrent) return Number.POSITIVE_INFINITY;
+  if (policy.maxConcurrent !== null && state.active >= policy.maxConcurrent) {
+    return Number.POSITIVE_INFINITY;
+  }
 
   state.events = pruneQuotaEvents(state.events, now);
   const delays = [
     Math.max(0, state.blockedUntil - now),
-    Math.max(0, state.lastStartedAt + model.limits.minimumSpacingMs - now),
-    waitForRequestWindow(state.events, now, MINUTE_MS, model.limits.requestsPerMinute),
-    waitForRequestWindow(state.events, now, DAY_MS, model.limits.requestsPerDay),
-    waitForTokenWindow(state.events, now, inputTokens, model.limits.inputTokensPerMinute),
+    Math.max(0, state.lastStartedAt + policy.limits.minimumSpacingMs - now),
+    waitForRequestWindow(state.events, now, MINUTE_MS, policy.limits.requestsPerMinute),
+    waitForRequestWindow(state.events, now, DAY_MS, policy.limits.requestsPerDay),
+    waitForTokenWindow(state.events, now, inputTokens, policy.limits.inputTokensPerMinute),
   ];
 
   return Math.max(...delays);

@@ -1,11 +1,10 @@
 import { randomUUID } from "node:crypto";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
-import { isAuthorized } from "./auth.ts";
-import { loadConfig, relayApiKeys, resolveProviderApiKey } from "./config.ts";
+import { loadConfig, resolveProviderApiKey } from "./config.ts";
 import { log } from "./log.ts";
 import { estimateInputTokens } from "./quota.ts";
 import { RelayScheduler } from "./relay.ts";
-import type { ChatCompletionRequest, RelayConfig, RelayJob } from "./types.ts";
+import type { ChatCompletionRequest, ProviderId, RelayConfig, RelayJob } from "./types.ts";
 
 function json(response: ServerResponse, status: number, value: unknown): void {
   response.writeHead(status, {
@@ -82,12 +81,10 @@ function modelsPayload(config: RelayConfig): Record<string, unknown> {
 
 async function main(): Promise<void> {
   const config = await loadConfig();
-  const relayKeys = relayApiKeys();
-  if (relayKeys.length === 0) throw new Error("At least one RELAY_API_KEY or RELAY_API_KEY_<number> is required");
-
   const scheduler = new RelayScheduler(config);
-  for (const [providerId, provider] of Object.entries(config.providers)) {
-    const credential = resolveProviderApiKey(provider);
+
+  for (const providerId of Object.keys(config.providers) as ProviderId[]) {
+    const credential = resolveProviderApiKey(providerId);
     log(credential ? "info" : "warn", "provider_config", {
       provider: providerId,
       configured: Boolean(credential),
@@ -97,11 +94,6 @@ async function main(): Promise<void> {
 
   const server = createServer(async (request, response) => {
     const url = new URL(request.url ?? "/", `http://${request.headers.host ?? "localhost"}`);
-
-    if (!isAuthorized(request, relayKeys)) {
-      openAiHttpError(response, 401, "unauthorized", "Invalid or missing relay API key.");
-      return;
-    }
 
     if (request.method === "GET" && url.pathname === "/") {
       json(response, 200, {
@@ -160,6 +152,7 @@ async function main(): Promise<void> {
       stream,
       excludedModels: new Set<string>(),
       cancelled: false,
+      bypassCount: 0,
       heartbeatTimer,
     };
 

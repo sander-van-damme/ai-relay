@@ -10,6 +10,10 @@ import type {
 } from "./types.ts";
 
 const PROVIDER_IDS = new Set<ProviderId>(["google", "nvidia"]);
+const PROVIDER_API_KEY_ENV: Record<ProviderId, string> = {
+  google: "GEMINI_API_KEY",
+  nvidia: "NVIDIA_API_KEY",
+};
 
 function record(value: unknown, label: string): Record<string, unknown> {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
@@ -48,6 +52,14 @@ function positiveLimit(value: unknown, label: string): number | null {
   return value;
 }
 
+function concurrencyLimit(value: unknown, label: string): number | null {
+  if (value === undefined || value === null) return null;
+  if (!Number.isInteger(value) || (value as number) < 1 || (value as number) > 1024) {
+    throw new Error(`${label} must be null or an integer between 1 and 1024`);
+  }
+  return value as number;
+}
+
 function booleanValue(value: unknown, fallback: boolean): boolean {
   return value === undefined ? fallback : Boolean(value);
 }
@@ -66,20 +78,13 @@ function parseServer(value: unknown): ServerConfig {
       1,
       3600,
     ),
-    bodyLimitBytes: numberValue(raw.bodyLimitBytes, "server.bodyLimitBytes", 10 * 1024 * 1024, 1024, 100 * 1024 * 1024),
-  };
-}
-
-function parseProvider(value: unknown, id: ProviderId): ProviderConfig {
-  const raw = record(value, `providers.${id}`);
-  const env = raw.apiKeyEnv;
-  if (!Array.isArray(env) || env.length === 0 || env.some((entry) => typeof entry !== "string" || entry.trim().length === 0)) {
-    throw new Error(`providers.${id}.apiKeyEnv must be a non-empty string array`);
-  }
-
-  return {
-    baseUrl: stringValue(raw.baseUrl, `providers.${id}.baseUrl`).replace(/\/$/, ""),
-    apiKeyEnv: env.map((entry) => String(entry).trim()),
+    bodyLimitBytes: numberValue(
+      raw.bodyLimitBytes,
+      "server.bodyLimitBytes",
+      10 * 1024 * 1024,
+      1024,
+      100 * 1024 * 1024,
+    ),
   };
 }
 
@@ -90,6 +95,15 @@ function parseLimits(value: unknown, label: string): ModelLimits {
     inputTokensPerMinute: positiveLimit(raw.inputTokensPerMinute, `${label}.inputTokensPerMinute`),
     requestsPerDay: positiveLimit(raw.requestsPerDay, `${label}.requestsPerDay`),
     minimumSpacingMs: numberValue(raw.minimumSpacingMs, `${label}.minimumSpacingMs`, 0, 0, 86_400_000),
+  };
+}
+
+function parseProvider(value: unknown, id: ProviderId): ProviderConfig {
+  const raw = record(value, `providers.${id}`);
+  return {
+    baseUrl: stringValue(raw.baseUrl, `providers.${id}.baseUrl`).replace(/\/$/, ""),
+    maxConcurrent: concurrencyLimit(raw.maxConcurrent, `providers.${id}.maxConcurrent`),
+    limits: parseLimits(raw.limits, `providers.${id}.limits`),
   };
 }
 
@@ -106,7 +120,7 @@ function parseModel(value: unknown, index: number): ModelConfig {
     provider,
     upstreamModel: stringValue(raw.upstreamModel, `${label}.upstreamModel`),
     enabled: booleanValue(raw.enabled, true),
-    maxConcurrent: numberValue(raw.maxConcurrent, `${label}.maxConcurrent`, 1, 1, 64),
+    maxConcurrent: concurrencyLimit(raw.maxConcurrent, `${label}.maxConcurrent`),
     limits: parseLimits(raw.limits, `${label}.limits`),
   };
 }
@@ -146,21 +160,12 @@ export async function loadConfig(path = process.env.AI_RELAY_CONFIG ?? "./config
   return parseConfig(JSON.parse(text) as unknown);
 }
 
-export function resolveProviderApiKey(provider: ProviderConfig): { env: string; value: string } | undefined {
-  for (const name of provider.apiKeyEnv) {
-    const value = process.env[name];
-    if (value?.trim()) return { env: name, value: value.trim() };
-  }
-  return undefined;
+export function providerApiKeyEnv(provider: ProviderId): string {
+  return PROVIDER_API_KEY_ENV[provider];
 }
 
-export function relayApiKeys(): string[] {
-  const keys = new Set<string>();
-  const direct = process.env.RELAY_API_KEY?.trim();
-  if (direct) keys.add(direct);
-
-  for (const [name, value] of Object.entries(process.env)) {
-    if (/^RELAY_API_KEY_\d+$/.test(name) && value?.trim()) keys.add(value.trim());
-  }
-  return [...keys];
+export function resolveProviderApiKey(provider: ProviderId): { env: string; value: string } | undefined {
+  const env = providerApiKeyEnv(provider);
+  const value = process.env[env]?.trim();
+  return value ? { env, value } : undefined;
 }

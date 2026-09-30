@@ -11,11 +11,6 @@ export interface ServerConfig {
   bodyLimitBytes: number;
 }
 
-export interface ProviderConfig {
-  baseUrl: string;
-  apiKeyEnv: string[];
-}
-
 export interface ModelLimits {
   requestsPerMinute: number | null;
   inputTokensPerMinute: number | null;
@@ -23,13 +18,20 @@ export interface ModelLimits {
   minimumSpacingMs: number;
 }
 
-export interface ModelConfig {
+export interface QuotaPolicy {
+  maxConcurrent: number | null;
+  limits: ModelLimits;
+}
+
+export interface ProviderConfig extends QuotaPolicy {
+  baseUrl: string;
+}
+
+export interface ModelConfig extends QuotaPolicy {
   id: string;
   provider: ProviderId;
   upstreamModel: string;
   enabled: boolean;
-  maxConcurrent: number;
-  limits: ModelLimits;
 }
 
 export interface RelayConfig {
@@ -66,6 +68,7 @@ export interface RelayJob {
   stream: boolean;
   excludedModels: Set<string>;
   cancelled: boolean;
+  bypassCount: number;
   upstreamAbort?: AbortController;
   heartbeatTimer?: NodeJS.Timeout;
 }
