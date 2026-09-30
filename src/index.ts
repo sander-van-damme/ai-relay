@@ -2,7 +2,6 @@ import { randomUUID } from "node:crypto";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { loadConfig } from "./config.ts";
 import { log } from "./log.ts";
-import { estimateInputTokens } from "./request-estimate.ts";
 import { isAutoModel, RelayScheduler } from "./relay.ts";
 import type { ChatCompletionRequest, RelayJob } from "./types.ts";
 
@@ -135,7 +134,6 @@ async function main(): Promise<void> {
       body: { ...body, model: requestedModel, stream },
       response,
       enqueuedAt: Date.now(),
-      estimatedInputTokens: estimateInputTokens(body),
       requestedModel,
       stream,
       excludedModelIds: new Set<string>(),

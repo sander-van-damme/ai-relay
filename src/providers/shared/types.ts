@@ -4,8 +4,8 @@ export type ProviderOfferKind = "standard" | "overflow";
 
 export interface OfferRequest {
   offerKind: ProviderOfferKind;
+  body: ChatCompletionRequest;
   requestedModel: string;
-  estimatedInputTokens: number;
   maxOptimizationWaitMs: number;
   excludedModelIds: ReadonlySet<string>;
 }
@@ -15,6 +15,7 @@ export interface ProviderOffer {
   providerId: string;
   providerPriority: number;
   modelId: string;
+  inputTokens: number;
   inputCapacityTokens: number;
   availableAt: number;
 }
@@ -63,12 +64,12 @@ export interface Provider {
   readonly priority: number;
   isConfigured(): boolean;
   listModels(): readonly ProviderModelInfo[];
-  getBestOffer(request: OfferRequest, now?: number): ProviderOffer | null;
+  countInputTokens(body: ChatCompletionRequest, modelId: string): Promise<number>;
+  getBestOffer(request: OfferRequest, now?: number): Promise<ProviderOffer | null>;
   execute(
     offer: ProviderOffer,
     body: ChatCompletionRequest,
     stream: boolean,
-    estimatedInputTokens: number,
     signal: AbortSignal,
   ): Promise<ProviderExecutionResult>;
   status(now?: number): ProviderStatus;

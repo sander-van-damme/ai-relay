@@ -23,7 +23,6 @@ export interface RelayJob {
   body: ChatCompletionRequest;
   response: ServerResponse;
   enqueuedAt: number;
-  estimatedInputTokens: number;
   requestedModel: string;
   stream: boolean;
   excludedModelIds: Set<string>;

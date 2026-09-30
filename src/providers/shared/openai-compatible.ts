@@ -28,6 +28,11 @@ export interface ManagedModel {
   quota: QuotaPolicy;
 }
 
+export type InputTokenCounter = (
+  body: ChatCompletionRequest,
+  model: ManagedModel,
+) => number | Promise<number>;
+
 export interface OpenAICompatibleProviderOptions {
   id: string;
   priority: number;
@@ -35,6 +40,7 @@ export interface OpenAICompatibleProviderOptions {
   baseUrl: string;
   defaultRetryMs: number;
   providerFailureCooldownMs: number;
+  countInputTokens: InputTokenCounter;
   overflowProbe?: {
     hardCapTtlMs: number;
     limits: readonly QuotaLimitName[];
@@ -45,19 +51,20 @@ export interface OpenAICompatibleProviderOptions {
 
 interface Candidate {
   model: ManagedModel;
-  delayMs: number;
+  inputTokens: number;
   inputCapacityTokens: number;
+  availableAt: number;
   index: number;
 }
 
 function compareCapacity(left: Candidate, right: Candidate): number {
   return left.inputCapacityTokens - right.inputCapacityTokens
-    || left.delayMs - right.delayMs
+    || left.availableAt - right.availableAt
     || left.index - right.index;
 }
 
 function compareAvailability(left: Candidate, right: Candidate): number {
-  return left.delayMs - right.delayMs
+  return left.availableAt - right.availableAt
     || left.inputCapacityTokens - right.inputCapacityTokens
     || left.index - right.index;
 }
@@ -69,6 +76,8 @@ export class OpenAICompatibleProvider implements Provider {
   private readonly baseUrl: string;
   private readonly defaultRetryMs: number;
   private readonly providerFailureCooldownMs: number;
+  private readonly inputTokenCounter: InputTokenCounter;
+  private readonly tokenCountCache = new WeakMap<ChatCompletionRequest, Map<string, Promise<number>>>();
   private readonly overflowProbe?: {
     hardCapTtlMs: number;
     limits: ReadonlySet<QuotaLimitName>;
@@ -88,6 +97,7 @@ export class OpenAICompatibleProvider implements Provider {
     this.baseUrl = options.baseUrl.replace(/\/$/, "");
     this.defaultRetryMs = options.defaultRetryMs;
     this.providerFailureCooldownMs = options.providerFailureCooldownMs;
+    this.inputTokenCounter = options.countInputTokens;
     this.overflowProbe = options.overflowProbe
       ? {
           hardCapTtlMs: options.overflowProbe.hardCapTtlMs,
@@ -117,40 +127,72 @@ export class OpenAICompatibleProvider implements Provider {
     return state;
   }
 
-  private candidate(model: ManagedModel, index: number, request: OfferRequest, now: number): Candidate | null {
+
+  async countInputTokens(body: ChatCompletionRequest, modelId: string): Promise<number> {
+    const model = this.modelById(modelId);
+    let perModel = this.tokenCountCache.get(body);
+    if (!perModel) {
+      perModel = new Map<string, Promise<number>>();
+      this.tokenCountCache.set(body, perModel);
+    }
+
+    const cached = perModel.get(modelId);
+    if (cached) return cached;
+
+    const pending = Promise.resolve()
+      .then(() => this.inputTokenCounter(body, model))
+      .then((count) => {
+        if (!Number.isSafeInteger(count) || count < 0) {
+          throw new Error(`Provider ${this.id} returned an invalid input token count for ${modelId}: ${count}`);
+        }
+        return count;
+      })
+      .catch((error) => {
+        perModel!.delete(modelId);
+        throw error;
+      });
+
+    perModel.set(modelId, pending);
+    return pending;
+  }
+
+  private async candidate(model: ManagedModel, index: number, request: OfferRequest, now: number): Promise<Candidate | null> {
     if (request.excludedModelIds.has(model.id)) return null;
     if (request.requestedModel !== "auto" && request.requestedModel !== model.id) return null;
-    if (!quotaCanEverHandle(model.quota, request.estimatedInputTokens, model.contextWindowTokens)) return null;
 
+    const inputTokens = await this.countInputTokens(request.body, model.id);
+    if (!quotaCanEverHandle(model.quota, inputTokens, model.contextWindowTokens)) return null;
+
+    const evaluatedAt = Math.max(now, Date.now());
     const state = this.modelState(model.id);
-    const modelDelayMs = quotaDelayMs(model.quota, state, request.estimatedInputTokens, now);
-    const providerBlockedMs = Math.max(0, this.providerState.blockedUntil - now);
+    const modelDelayMs = quotaDelayMs(model.quota, state, inputTokens, evaluatedAt);
+    const providerBlockedMs = Math.max(0, this.providerState.blockedUntil - evaluatedAt);
 
     if (request.offerKind === "overflow") {
       if (!this.overflowProbe || providerBlockedMs > 0) return null;
-      if ((this.modelOverflowBlockedUntil.get(model.id) ?? 0) > now) return null;
+      if ((this.modelOverflowBlockedUntil.get(model.id) ?? 0) > evaluatedAt) return null;
 
       const modelCanOverflow = quotaCanOverflow(
         model.quota,
         state,
-        request.estimatedInputTokens,
+        inputTokens,
         this.overflowProbe.limits,
         model.contextWindowTokens,
-        now,
+        evaluatedAt,
       );
 
       let providerDelayMs = 0;
       let providerCanOverflow = false;
       if (this.providerQuota) {
-        if (!quotaCanEverHandle(this.providerQuota, request.estimatedInputTokens)) return null;
-        providerDelayMs = quotaDelayMs(this.providerQuota, this.providerState, request.estimatedInputTokens, now);
+        if (!quotaCanEverHandle(this.providerQuota, inputTokens)) return null;
+        providerDelayMs = quotaDelayMs(this.providerQuota, this.providerState, inputTokens, evaluatedAt);
         providerCanOverflow = quotaCanOverflow(
           this.providerQuota,
           this.providerState,
-          request.estimatedInputTokens,
+          inputTokens,
           this.overflowProbe.limits,
           Number.POSITIVE_INFINITY,
-          now,
+          evaluatedAt,
         );
       }
 
@@ -160,39 +202,53 @@ export class OpenAICompatibleProvider implements Provider {
 
       return {
         model,
-        delayMs: 0,
+        inputTokens,
         inputCapacityTokens: effectiveInputCapacity(model.quota, model.contextWindowTokens),
+        availableAt: evaluatedAt,
         index,
       };
     }
 
     const delays = [modelDelayMs, providerBlockedMs];
     if (this.providerQuota) {
-      if (!quotaCanEverHandle(this.providerQuota, request.estimatedInputTokens)) return null;
-      delays.push(quotaDelayMs(this.providerQuota, this.providerState, request.estimatedInputTokens, now));
+      if (!quotaCanEverHandle(this.providerQuota, inputTokens)) return null;
+      delays.push(quotaDelayMs(this.providerQuota, this.providerState, inputTokens, evaluatedAt));
     }
 
+    const delayMs = Math.max(...delays);
     return {
       model,
-      delayMs: Math.max(...delays),
+      inputTokens,
       inputCapacityTokens: effectiveInputCapacity(model.quota, model.contextWindowTokens),
+      availableAt: Number.isFinite(delayMs) ? evaluatedAt + Math.max(0, delayMs) : Number.POSITIVE_INFINITY,
       index,
     };
   }
 
-  getBestOffer(request: OfferRequest, now = Date.now()): ProviderOffer | null {
+  async getBestOffer(request: OfferRequest, now = Date.now()): Promise<ProviderOffer | null> {
     if (!this.isConfigured()) return null;
 
-    const candidates = this.models
-      .map((model, index) => this.candidate(model, index, request, now))
+    const results = await Promise.all(this.models.map(async (model, index) => {
+      try {
+        return { candidate: await this.candidate(model, index, request, now), error: undefined };
+      } catch (error) {
+        return { candidate: null, error };
+      }
+    }));
+    const candidates = results
+      .map((result) => result.candidate)
       .filter((candidate): candidate is Candidate => candidate !== null);
-    if (candidates.length === 0) return null;
+    if (candidates.length === 0) {
+      const countingError = results.find((result) => result.error !== undefined)?.error;
+      if (countingError !== undefined) throw countingError;
+      return null;
+    }
 
     let chosen: Candidate;
     if (request.requestedModel !== "auto") {
       chosen = candidates[0]!;
     } else {
-      const withinCutoff = candidates.filter((candidate) => candidate.delayMs <= request.maxOptimizationWaitMs);
+      const withinCutoff = candidates.filter((candidate) => candidate.availableAt <= now + request.maxOptimizationWaitMs);
       chosen = withinCutoff.length > 0
         ? withinCutoff.sort(compareCapacity)[0]!
         : candidates.sort(compareAvailability)[0]!;
@@ -203,8 +259,9 @@ export class OpenAICompatibleProvider implements Provider {
       providerId: this.id,
       providerPriority: this.priority,
       modelId: chosen.model.id,
+      inputTokens: chosen.inputTokens,
       inputCapacityTokens: chosen.inputCapacityTokens,
-      availableAt: Number.isFinite(chosen.delayMs) ? now + Math.max(0, chosen.delayMs) : Number.POSITIVE_INFINITY,
+      availableAt: chosen.availableAt,
     };
   }
 
@@ -246,7 +303,6 @@ export class OpenAICompatibleProvider implements Provider {
     offer: ProviderOffer,
     body: ChatCompletionRequest,
     stream: boolean,
-    estimatedInputTokens: number,
     signal: AbortSignal,
   ): Promise<ProviderExecutionResult> {
     const apiKey = process.env[this.credentialEnv]?.trim();
@@ -256,9 +312,9 @@ export class OpenAICompatibleProvider implements Provider {
 
     const model = this.modelById(offer.modelId);
     const now = Date.now();
-    reserveQuota(model.quota, this.modelState(model.id), estimatedInputTokens, now);
+    reserveQuota(model.quota, this.modelState(model.id), offer.inputTokens, now);
     if (this.providerQuota) {
-      reserveQuota(this.providerQuota, this.providerState, estimatedInputTokens, now);
+      reserveQuota(this.providerQuota, this.providerState, offer.inputTokens, now);
     }
 
     const upstreamBody = { ...body, model: model.upstreamModel, stream };

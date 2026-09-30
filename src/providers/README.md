@@ -25,12 +25,28 @@ Capacity must account for all hard limits that can make one request impossible, 
 
 A request that can never fit must not produce an offer.
 
+## Input token counting
+
+Input token counting is provider-owned and model-specific.
+
+The relay must not apply a provider-independent token estimate. Before advertising an offer, a provider must determine the input token count for the concrete model through `countInputTokens()`. It may use a local model tokenizer, an official SDK, or an authoritative provider counting endpoint.
+
+`countInputTokens()` is asynchronous because some providers can only determine the authoritative count through I/O. Providers with local tokenizers may still return the result immediately through the same async interface.
+
+The count must reflect the actual request representation seen by that model, including provider-specific chat formatting, system/developer instructions, tool definitions and other input that consumes the model's context. If a provider cannot determine an authoritative count for a request, it must not fall back to a generic bytes/characters heuristic.
+
+`ProviderOffer.inputTokens` is the authoritative count used for that offer. Execution and quota accounting must reuse that exact value rather than tokenizing the request again.
+
+Providers may cache token counts per request/model so repeated standard/overflow evaluation does not repeat expensive tokenization or network calls. A failed count must not be cached permanently when a later retry could succeed.
+
+The current Google provider uses the official `@google/genai` `countTokens` API for counting while generation still uses Google's OpenAI-compatible transport. The current NVIDIA GPT-OSS provider uses the model's `o200k_harmony` tokenizer locally.
+
 ## Offer selection
 
-`getBestOffer()` owns selection inside one provider. It must consider:
+`getBestOffer()` is asynchronous and owns selection inside one provider. It must consider:
 
 - requested model and `auto`;
-- estimated input tokens;
+- the model-specific input token count;
 - context/capacity limits;
 - RPM, TPM, RPD or equivalent quotas;
 - provider-wide quotas;
@@ -136,6 +152,9 @@ A provider is incomplete until tests cover at least:
 12. Overflow never exceeds hard request capacity or non-opted-in quota dimensions.
 13. A quota rejection from an overflow attempt suppresses repeated probes for the provider-defined hard-cap TTL.
 14. Network/`5xx` failures do not incorrectly create a hard-cap observation.
+15. Token counting is model-specific and no provider-independent estimate is used.
+16. The exact token count on the selected offer is reused for quota accounting and execution.
+17. Repeated offer evaluation reuses a cached successful token count when appropriate.
 
 ## Adding a provider
 
@@ -143,4 +162,4 @@ A new provider should normally require changes only under `src/providers/`, regi
 
 If adding a provider requires `if (provider === ...)` logic in `relay.ts`, reconsider the provider interface first.
 
-Google is a candidate for a later migration to `@google/genai`. That migration should remain entirely inside the Google provider so provider-native functionality does not leak into the scheduler.
+Google currently uses `@google/genai` for authoritative token counting. A later migration of generation itself to the native Google SDK should remain entirely inside the Google provider so provider-native functionality does not leak into the scheduler.
