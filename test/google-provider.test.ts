@@ -62,9 +62,10 @@ function fakeClient(
   } as unknown as GoogleGenAI;
 }
 
-function completedInteraction(id: string, text = "Hello back") {
+function completedInteraction(id: string, text = "Hello back", environmentId?: string) {
   return {
     id,
+    ...(environmentId ? { environment_id: environmentId } : {}),
     status: "completed",
     created: "2026-10-01T08:00:00Z",
     steps: [
@@ -283,7 +284,11 @@ test("Antigravity uses the agent API with Search and caller-provided functions o
   const client = fakeClient((request) => {
     requests.push(request as Record<string, unknown>);
     call += 1;
-    return completedInteraction(`agent-${call}`, call === 1 ? "First answer" : "Second answer");
+    return completedInteraction(
+      `agent-${call}`,
+      call === 1 ? "First answer" : "Second answer",
+      "env-agent",
+    );
   });
 
   try {
@@ -334,7 +339,7 @@ test("Antigravity uses the agent API with Search and caller-provided functions o
     const firstRequest = requests[0]!;
     assert.equal(firstRequest.agent, "antigravity-preview-09-2026");
     assert.equal(firstRequest.model, undefined);
-    assert.equal(firstRequest.environment, undefined);
+    assert.equal(firstRequest.environment, "remote");
     assert.deepEqual(firstRequest.agent_config, {
       type: "antigravity",
       model: "gemini-3.8-flash",
@@ -378,6 +383,7 @@ test("Antigravity uses the agent API with Search and caller-provided functions o
     if (secondResult.status === "success") secondResult.release();
 
     assert.equal(requests[1]?.previous_interaction_id, "agent-1");
+    assert.equal(requests[1]?.environment, "env-agent");
     assert.deepEqual(requests[1]?.input, [
       { type: "user_input", content: [{ type: "text", text: "Continue." }] },
     ]);
@@ -402,6 +408,7 @@ test("Antigravity keeps native tool-call continuations stateful", async () => {
         if (call === 1) {
           return {
             id: "native-agent-call",
+            environment_id: "env-native",
             status: "requires_action",
             created: "2026-10-01T08:00:00Z",
             steps: [{
@@ -413,7 +420,7 @@ test("Antigravity keeps native tool-call continuations stateful", async () => {
             usage: { total_input_tokens: 10, total_output_tokens: 2, total_tokens: 12 },
           };
         }
-        return completedInteraction("native-agent-result", "Done");
+        return completedInteraction("native-agent-result", "Done", "env-native");
       }),
       [antigravity],
       async () => 20,
@@ -462,7 +469,9 @@ test("Antigravity keeps native tool-call continuations stateful", async () => {
     assert.equal(secondResult.status, "success");
     if (secondResult.status === "success") secondResult.release();
 
+    assert.equal(requests[0]?.environment, "remote");
     assert.equal(requests[1]?.previous_interaction_id, "native-agent-call");
+    assert.equal(requests[1]?.environment, "env-native");
     assert.deepEqual(requests[1]?.input, [{
       type: "function_result",
       name: "read_file",
@@ -488,7 +497,11 @@ test("Antigravity bootstraps external tool history as text, then resumes statefu
       () => fakeClient((request) => {
         requests.push(request as Record<string, unknown>);
         call += 1;
-        return completedInteraction(`bootstrap-agent-${call}`, call === 1 ? "Recovered context" : "Continued");
+        return completedInteraction(
+          `bootstrap-agent-${call}`,
+          call === 1 ? "Recovered context" : "Continued",
+          "env-bootstrap",
+        );
       }),
       [antigravity],
       async (_apiKey, _model, input) => {
@@ -539,6 +552,7 @@ test("Antigravity bootstraps external tool history as text, then resumes statefu
     assert.match(JSON.stringify(firstCountContents), /call_external/);
 
     assert.equal(requests[0]?.previous_interaction_id, undefined);
+    assert.equal(requests[0]?.environment, "remote");
     const bootstrapInput = requests[0]?.input as Array<Record<string, unknown>>;
     assert.equal(bootstrapInput.length, 1);
     assert.equal(bootstrapInput[0]?.type, "user_input");
@@ -563,6 +577,7 @@ test("Antigravity bootstraps external tool history as text, then resumes statefu
     if (secondResult.status === "success") secondResult.release();
 
     assert.equal(requests[1]?.previous_interaction_id, "bootstrap-agent-1");
+    assert.equal(requests[1]?.environment, "env-bootstrap");
     assert.deepEqual(requests[1]?.input, [
       { type: "user_input", content: [{ type: "text", text: "One more thing." }] },
     ]);
@@ -685,7 +700,7 @@ test("Antigravity still overrides default tools when the caller provides no func
     const provider = new GoogleProvider(
       () => fakeClient((request) => {
         requests.push(request as Record<string, unknown>);
-        return completedInteraction("agent-no-tools");
+        return completedInteraction("agent-no-tools", "Hello back", "env-no-tools");
       }),
       [antigravity],
     );
@@ -700,11 +715,89 @@ test("Antigravity still overrides default tools when the caller provides no func
     if (result.status === "success") result.release();
 
     assert.deepEqual(requests[0]?.tools, [{ type: "google_search" }]);
-    assert.equal(requests[0]?.environment, undefined);
+    assert.equal(requests[0]?.environment, "remote");
     assert.deepEqual(requests[0]?.agent_config, {
       type: "antigravity",
       model: "gemini-3.8-flash",
     });
+  } finally {
+    if (originalKey === undefined) delete process.env.GEMINI_API_KEY;
+    else process.env.GEMINI_API_KEY = originalKey;
+  }
+});
+
+test("Antigravity streaming captures environment state for the next turn", async () => {
+  const originalKey = process.env.GEMINI_API_KEY;
+  process.env.GEMINI_API_KEY = "test";
+  const antigravity = GOOGLE_MODELS.find((model) => model.id === "google/antigravity-preview-09-2026")!;
+  const requests: Array<Record<string, unknown>> = [];
+  let call = 0;
+
+  async function* firstStream() {
+    yield {
+      event_type: "interaction.created",
+      interaction: {
+        id: "agent-stream-1",
+        environment_id: "env-stream-1",
+        status: "in_progress",
+        created: "2026-10-01T08:00:00Z",
+      },
+    };
+    yield { event_type: "step.delta", index: 0, delta: { type: "text", text: "Streamed answer" } };
+    yield {
+      event_type: "interaction.completed",
+      interaction: {
+        id: "agent-stream-1",
+        status: "completed",
+        usage: { total_input_tokens: 20, total_output_tokens: 2, total_tokens: 22 },
+      },
+    };
+  }
+
+  try {
+    const provider = new GoogleProvider(
+      () => fakeClient((request) => {
+        requests.push(request as Record<string, unknown>);
+        call += 1;
+        if (call === 1) return firstStream();
+        return completedInteraction("agent-stream-2", "Follow-up", "env-stream-1");
+      }),
+      [antigravity],
+      async () => 20,
+    );
+
+    const firstBody = { messages: [{ role: "user", content: "Hello" }] };
+    const firstOffer = (await bestOffer(provider, {
+      ...standardRequest,
+      body: firstBody,
+      requestedModel: antigravity.id,
+    }, Date.now()))!;
+    const firstResult = await provider.execute(firstOffer, firstBody, true, new AbortController().signal);
+    assert.equal(firstResult.status, "success");
+    if (firstResult.status !== "success") return;
+    const streamed = await firstResult.response.text();
+    firstResult.release();
+    assert.match(streamed, /Streamed answer/);
+    assert.equal(requests[0]?.environment, "remote");
+
+    const secondBody = {
+      messages: [
+        { role: "user", content: "Hello" },
+        { role: "assistant", content: "Streamed answer" },
+        { role: "user", content: "Continue." },
+      ],
+    };
+    const secondOffer = (await bestOffer(provider, {
+      ...standardRequest,
+      body: secondBody,
+      requestedModel: antigravity.id,
+    }, Date.now()))!;
+    const secondResult = await provider.execute(secondOffer, secondBody, false, new AbortController().signal);
+    assert.equal(secondResult.status, "success");
+    if (secondResult.status === "success") secondResult.release();
+
+    assert.equal(requests[1]?.previous_interaction_id, "agent-stream-1");
+    assert.equal(requests[1]?.environment, "env-stream-1");
   } finally {
     if (originalKey === undefined) delete process.env.GEMINI_API_KEY;
     else process.env.GEMINI_API_KEY = originalKey;

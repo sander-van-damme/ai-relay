@@ -79,6 +79,7 @@ interface Continuation {
   upstreamTarget: string;
   expiresAt: number;
   interactionId?: string;
+  environmentId?: string;
   generateContents?: Content[];
 }
 
@@ -197,6 +198,7 @@ interface GoogleAgentInteractionRequest {
   store: true;
   stream: boolean;
   previous_interaction_id?: string;
+  environment: string;
   system_instruction?: string;
   tools: Array<
     | { type: "google_search" }
@@ -209,6 +211,7 @@ function antigravityRequest(
   request: GoogleInteractionRequest,
   model: GoogleModel,
   inputTokens: number,
+  environmentId?: string,
 ): GoogleAgentInteractionRequest {
   if (!model.upstreamAgent) throw new Error(`Google model ${model.id} is not an agent route.`);
   const unsupported = Object.entries(request.generation_config ?? {})
@@ -235,6 +238,7 @@ function antigravityRequest(
     input: request.input,
     store: true,
     stream: request.stream,
+    environment: environmentId ?? "remote",
     ...(request.previous_interaction_id ? { previous_interaction_id: request.previous_interaction_id } : {}),
     system_instruction: request.system_instruction
       ? `${ANTIGRAVITY_SYSTEM_INSTRUCTION}\n\n${request.system_instruction}`
@@ -609,7 +613,8 @@ export class GoogleProvider implements Provider {
   private requestPlan(body: ChatCompletionRequest, model: GoogleModel): GoogleRequestPlan {
     if (model.upstreamAgent) {
       const target = interactionTarget(model);
-      const continuation = this.safeContinuation(body, target);
+      const candidateContinuation = this.safeContinuation(body, target);
+      const continuation = candidateContinuation?.environmentId ? candidateContinuation : undefined;
       if (continuation) {
         return {
           body,
@@ -947,8 +952,14 @@ export class GoogleProvider implements Provider {
     const assistant = assistantMessageFromInteraction(value);
     const continued = [...messages, assistant];
     this.continuations.delete(prefixKey(continued));
+    const environmentId = typeof value.environment_id === "string"
+      ? value.environment_id
+      : typeof value.environmentId === "string"
+        ? value.environmentId
+        : undefined;
     this.continuations.set(prefixKey(continued), {
       interactionId: value.id,
+      ...(environmentId ? { environmentId } : {}),
       inputStartIndex: continued.length,
       upstreamTarget,
       expiresAt: Date.now() + CONTINUATION_TTL_MS,
@@ -1008,6 +1019,7 @@ export class GoogleProvider implements Provider {
     const output = new ReadableStream<Uint8Array>({
       async start(controller) {
         let interactionId = "google";
+        let environmentId: string | undefined;
         let created = Math.floor(Date.now() / 1000);
         let sentRole = false;
         let sawToolCall = false;
@@ -1040,6 +1052,12 @@ export class GoogleProvider implements Provider {
             if (event.event_type === "interaction.created") {
               const interaction = object(event.interaction);
               if (typeof interaction?.id === "string") interactionId = interaction.id;
+              const createdEnvironmentId = typeof interaction?.environment_id === "string"
+                ? interaction.environment_id
+                : typeof interaction?.environmentId === "string"
+                  ? interaction.environmentId
+                  : undefined;
+              if (createdEnvironmentId) environmentId = createdEnvironmentId;
               if (typeof interaction?.created === "string") {
                 const parsed = Date.parse(interaction.created);
                 if (Number.isFinite(parsed)) created = Math.floor(parsed / 1000);
@@ -1087,11 +1105,18 @@ export class GoogleProvider implements Provider {
             if (event.event_type === "interaction.completed") {
               const interaction = object(event.interaction);
               if (typeof interaction?.id === "string") interactionId = interaction.id;
+              const completedEnvironmentId = typeof interaction?.environment_id === "string"
+                ? interaction.environment_id
+                : typeof interaction?.environmentId === "string"
+                  ? interaction.environmentId
+                  : undefined;
+              if (completedEnvironmentId) environmentId = completedEnvironmentId;
               finalStatus = interaction?.status ?? finalStatus;
               finalUsage = interaction?.usage;
               if (interaction) {
                 const synthetic = {
                   ...interaction,
+                  ...(environmentId ? { environment_id: environmentId } : {}),
                   steps: [
                     ...(fullText ? [{ type: "model_output", content: [{ type: "text", text: fullText }] }] : []),
                     ...toolCalls.map((call) => ({
@@ -1414,7 +1439,7 @@ export class GoogleProvider implements Provider {
           } : undefined,
         );
         const interactionRequest = model.upstreamAgent
-          ? antigravityRequest(request, model, offer.inputTokens)
+          ? antigravityRequest(request, model, offer.inputTokens, continuation?.environmentId)
           : request;
         const result = await client.interactions.create(interactionRequest as any, { fetchOptions: { signal } } as any);
 

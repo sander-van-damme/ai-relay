@@ -22,12 +22,14 @@ Token counting follows the same request plan as execution, so transcript bootstr
 
 `google/antigravity-preview-09-2026` is exposed through the same relay `/v1/chat/completions` API as the model-backed routes. The provider invokes `agent: "antigravity-preview-09-2026"` and pins the agent's underlying reasoning model to `gemini-3.8-flash`.
 
-The relay intentionally does not provide an Antigravity `environment`. It also replaces Antigravity's default tool set with an explicit list containing:
+Antigravity's managed-agent API requires an environment on every interaction. For a fresh interaction the relay supplies `environment: "remote"`, which asks Google to provision the required provider-owned sandbox. The returned `environment_id` is stored with the interaction ID and reused on stateful continuations. The relay does not mount caller files, repositories, credentials, or other sources into that environment.
+
+The relay also replaces Antigravity's default tool set with an explicit list containing:
 
 - Google Search, for public-information grounding;
 - any function tools supplied by the incoming Chat Completions request.
 
-Because the tool list is explicit, Antigravity does not receive its default `code_execution` or URL Context tools, and without an `environment` it does not receive Google's filesystem tools. Caller-provided functions remain caller-owned: Google may request them, but the relay never executes them itself. This keeps the relay generic and lets clients such as coding agents continue to own their actual workspace and tool execution.
+Because the tool list is explicit, Antigravity does not receive its default `code_execution` or URL Context tools. Caller-provided functions remain caller-owned: Google may request them, but the relay never executes them itself. The provider sandbox is not treated as the caller's authoritative workspace; the provider-owned system instruction continues to direct the agent to use caller-supplied tools for caller-environment actions.
 
 A short provider-owned system instruction only establishes that Antigravity is serving a chat-completions interface, that caller-provided functions operate on the caller's authoritative external environment, and that no filesystem/shell/runtime should be assumed beyond explicitly supplied tools. Client system/developer instructions are appended unchanged after that prefix.
 
@@ -37,7 +39,7 @@ Antigravity's AI Studio quota is configured as 60 RPM, 100K input TPM, and 100 R
 
 Google quota accounting uses the AI Studio RPM, TPM and RPD limits. RPD resets at midnight in `America/Los_Angeles`. Speculative overflow is enabled only for RPD because observed project usage can exceed that displayed daily limit. RPM, TPM, context capacity and provider/model health remain hard constraints. If an overflow attempt receives a Google `429` that explicitly identifies the daily/RPD quota, overflow for that route is suppressed only until the next Pacific midnight, matching the same calendar-day boundary used by local RPD accounting. The learned overflow block is purged on the next provider evaluation/status read after that boundary. Generic `429` responses, unrelated network errors, and `5xx` responses do not create that observation.
 
-Interactions are stored so follow-up requests can use `previous_interaction_id`, preserving Google-native multi-turn/tool state. Continuation keys distinguish model interactions from agent interactions even when Antigravity uses Gemini 3.8 Flash underneath. Continuation state is bounded to one hour and reused only on the same upstream target.
+Interactions are stored so follow-up requests can use `previous_interaction_id`, preserving Google-native multi-turn/tool state. Antigravity continuations also store and resend the associated `environment_id`, because Google's managed-agent API requires both conversation state and environment state on chained interactions. Continuation keys distinguish model interactions from agent interactions even when Antigravity uses Gemini 3.8 Flash underneath. Continuation state is bounded to one hour and reused only on the same upstream target.
 
 ## Configuration
 
