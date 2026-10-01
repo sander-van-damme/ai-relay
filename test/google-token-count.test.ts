@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   toGoogleCountInput,
+  toGoogleGenerateContentRequest,
   toGoogleInteractionRequest,
 } from "../src/providers/google/token-count.ts";
 
@@ -137,6 +138,42 @@ test("Google Interactions maps chat options without the OpenAI-compatible transp
       required: ["temperature"],
     },
   });
+});
+
+test("Google generateContent mapping supports Robotics sampling and native config", () => {
+  const request = toGoogleGenerateContentRequest({
+    messages: [
+      { role: "system", content: "Be precise." },
+      { role: "user", content: "Plan the motion." },
+    ],
+    temperature: 0.2,
+    top_p: 0.8,
+    max_completion_tokens: 120,
+    reasoning_effort: "high",
+    tool_choice: "required",
+    tools: [
+      {
+        type: "function",
+        function: {
+          name: "move_robot",
+          parameters: { type: "object", properties: { x: { type: "number" } } },
+        },
+      },
+    ],
+  }, "gemini-robotics-er-2-preview");
+
+  assert.equal(request.model, "gemini-robotics-er-2-preview");
+  assert.deepEqual(request.contents, [
+    { role: "user", parts: [{ text: "Plan the motion." }] },
+  ]);
+  assert.equal(request.config?.temperature, 0.2);
+  assert.equal(request.config?.topP, 0.8);
+  assert.equal(request.config?.maxOutputTokens, 120);
+  assert.deepEqual(request.config?.thinkingConfig, { thinkingLevel: "HIGH" });
+  assert.deepEqual(request.config?.toolConfig, {
+    functionCallingConfig: { mode: "ANY" },
+  });
+  assert.deepEqual(request.config?.systemInstruction, { parts: [{ text: "Be precise." }] });
 });
 
 test("Google rejects sampling options absent from pinned Interactions v2.24", () => {
