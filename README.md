@@ -16,7 +16,7 @@ Install dependencies, add your provider keys, and install the service:
 ```bash
 npm install
 cp .env.example .env
-# Edit .env and set GEMINI_API_KEY. NVIDIA_API_KEY is reserved for the unfinished NVIDIA provider.
+# Edit .env and configure the providers you want to use.
 sudo npm run install-service
 ```
 
@@ -43,6 +43,8 @@ The relay core does not know provider transports or provider-specific quota sema
 The scheduler only compares one offer per provider, waits when that buys a smaller-capacity model within the optimization cutoff, and fails over when an execution attempt fails.
 
 Concrete provider implementations live under `src/providers/<provider>/`. Reusable implementation helpers live under `src/providers/shared/`; using them is optional. A provider may use an official SDK, an OpenAI-compatible transport, or its own implementation without changing the scheduler. See `src/providers/README.md` for the provider implementation contract. The checked-in `config/relay.json` contains only server settings. Provider retry/quota rules stay with the provider and secrets stay in the environment.
+
+> **Provider documentation:** Do not add provider-specific setup, models, quotas, transport details, or implementation status to this README. Keep that information in `src/providers/<provider>/README.md`.
 
 ## Offer routing
 
@@ -75,22 +77,6 @@ Providers maintain their own health/cooldown state. A network failure or upstrea
 After a failed execution the request keeps its original queue age, but sets a one-shot yield flag. If a younger request is runnable, exactly one younger dispatch may pass before the failed request becomes eligible again. This avoids both extremes: sending a failed request to the back of the queue, or allowing one unstable request to monopolize all dispatches.
 
 The existing work-conserving queue behavior remains: blocked requests may be bypassed so usable quota is not wasted, with a starvation barrier after repeated bypasses.
-
-## Google provider
-
-Google is implemented directly on the official `@google/genai` SDK and the native Interactions API via `interactions.create()`, including Gemini Robotics ER 2 Preview. The provider does not use Google's OpenAI-compatible Chat Completions endpoint.
-
-The checked-in catalog mirrors the non-zero AI Studio quotas supplied for this relay project on 2026-10-01. It includes only endpoints that accept text and produce text: Gemini Flash/Flash-Lite text models, Gemma 4 26B/31B, and Gemini Robotics ER 2 Preview. TTS, Live/audio, image-generation, embedding, video/music, and agent endpoints are intentionally excluded. Model-specific request capabilities such as supported thinking levels are also treated as hard routing constraints.
-
-Google quota accounting uses the AI Studio RPM, TPM and RPD limits. RPD resets at midnight in `America/Los_Angeles`. Speculative overflow is enabled only for RPD because the observed project usage can exceed that displayed daily limit. RPM, TPM, context capacity and provider/model health remain hard constraints. If an overflow attempt receives a Google `429` that explicitly identifies the daily/RPD quota, overflow for that model is suppressed for exactly 24 hours. Generic `429` responses, unrelated network errors, and `5xx` responses do not create that observation.
-
-Interactions are stored so follow-up requests can use `previous_interaction_id`, preserving Google-native multi-turn/tool state. Continuation state is bounded to one hour and reused only on the same upstream model.
-
-## NVIDIA provider
-
-The NVIDIA implementation is retained as unfinished scaffolding but is intentionally disabled. Its `getBestOffer()` currently always returns a structured `no_offer` result with reason `no_eligible_model`, so the scheduler cannot select NVIDIA even when `NVIDIA_API_KEY` is configured.
-
-Before enabling it, the NVIDIA provider still needs to follow the full contract in `src/providers/README.md`: evaluate the official SDK/native APIs versus the OpenAI-compatible endpoint, expand and verify the model catalog and capabilities, implement verified request/token/daily/concurrency limits, validate authoritative token counting and capacities, implement NVIDIA-specific failure/cooldown/overflow behavior, and add the required provider tests.
 
 ## API
 
@@ -133,14 +119,7 @@ There is no relay authentication. The service binds to `127.0.0.1` and is intend
 }
 ```
 
-Provider credentials:
-
-```text
-GEMINI_API_KEY
-NVIDIA_API_KEY
-```
-
-`NVIDIA_API_KEY` is currently unused for routing because the NVIDIA provider is intentionally disabled pending completion.
+Provider credentials are configured through environment variables. See the README inside each `src/providers/<provider>/` directory for that provider's required variables and current status.
 
 For local development, `npm start` reads `.env` when present. The systemd service reads `/etc/ai-relay.env`.
 
