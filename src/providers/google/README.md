@@ -2,9 +2,21 @@
 
 Google execution is implemented on the official `@google/genai` SDK and the native Interactions API via `interactions.create()`. The provider does not use Google's OpenAI-compatible Chat Completions endpoint. Authoritative token counting normally uses the SDK's `models.countTokens()`; when the request includes count-relevant configuration such as system instructions, tools, or response schema, the provider calls the Gemini Developer API `:countTokens` REST endpoint with a full nested `generateContentRequest`. This is required because the pinned SDK's `CountTokensConfig` path does not support that configuration in Gemini Developer API mode.
 
-The checked-in catalog starts from the non-zero AI Studio quotas supplied for this relay project on 2026-10-01 and excludes routes that the Developer API subsequently reports as unavailable. In particular, `gemini-2.5-flash` is omitted after the API returned a 404 stating that the model is no longer available to new users; `gemini-2.5-flash-lite` remains enabled. The catalog otherwise includes text-capable Gemini Flash/Flash-Lite models, Gemma 4 26B/31B, Gemini Robotics ER 2 Preview, and the Antigravity managed agent. TTS, Live/audio, image-generation, embedding, video/music, zero-quota routes, and agents that do not fit the relay's chat-completions contract are excluded. Model-specific request capabilities such as supported thinking levels are treated as hard routing constraints.
+The checked-in catalog starts from the non-zero AI Studio quotas supplied for this relay project on 2026-10-01 and excludes routes that the Developer API subsequently reports as unavailable. In particular, both `gemini-2.5-flash` and `gemini-2.5-flash-lite` are omitted after the API returned 404 responses stating that they are no longer available to new users. The catalog otherwise includes text-capable Gemini Flash/Flash-Lite models, Gemma 4 26B/31B, Gemini Robotics ER 2 Preview, and the Antigravity managed agent. TTS, Live/audio, image-generation, embedding, video/music, zero-quota routes, and agents that do not fit the relay's chat-completions contract are excluded. Model-specific request capabilities such as supported thinking levels are treated as hard routing constraints.
 
 Each Google route has an explicit `preference` value. Capacity and availability remain the primary routing criteria. Preference is consulted only when candidates have the same effective input capacity and the same availability, with the larger value preferred. Values are deliberately spaced in increments of 100 so they can be adjusted later based on observed coding/task quality without changing the routing algorithm or pretending that release date alone determines quality.
+
+## Tool-history recovery
+
+Provider-native continuation state is preferred whenever the incoming OpenAI message prefix matches a stored Google continuation.
+
+When that state is unavailable, the relay recovers without treating provider-native state as authoritative:
+
+- Antigravity cannot accept reconstructed function-call history in stateless mode. If the OpenAI history already contains tool calls/results but no safe Antigravity continuation exists, the relay starts a fresh Antigravity interaction with the supplied conversation flattened into a plain-text historical transcript. Historical tool activity is labeled as already completed context, while the caller's current function tools are still supplied normally. The resulting interaction ID is stored so later turns resume statefully with `previous_interaction_id`.
+- Gemini model routes use GenerateContent for reconstructed OpenAI tool history. External function-call parts receive Google's documented `skip_thought_signature_validator` migration signature, allowing a trace from another model/API to be replayed. Once Gemini responds, the relay preserves Google's native model content and thought signatures and uses that native GenerateContent history on later turns.
+- A stored continuation is ignored if the caller has introduced a new assistant tool-call trace after that continuation boundary; that trace is treated as external history and recovered instead of being injected into the old native chain.
+
+Token counting follows the same request plan as execution, so transcript bootstraps and replay-safe GenerateContent requests are counted in the shape actually used for recovery.
 
 ## Antigravity
 
