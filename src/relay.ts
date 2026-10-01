@@ -27,6 +27,43 @@ function openAiError(code: string, message: string): Record<string, unknown> {
   return { error: { type: "relay_error", code, message } };
 }
 
+const UPSTREAM_REJECTION_DETAIL_MAX_CHARS = 1_000;
+
+function redactUpstreamDetail(value: string): string {
+  return value
+    .replace(/AIza[0-9A-Za-z_-]{20,}/g, "[REDACTED_GOOGLE_API_KEY]")
+    .replace(/Bearer\s+[A-Za-z0-9._~+/=-]+/gi, "Bearer [REDACTED]");
+}
+
+export function upstreamRejectionDetail(bodyText: string): string | null {
+  const text = bodyText.trim();
+  if (!text) return null;
+
+  let detail = text;
+  try {
+    const parsed = JSON.parse(text) as unknown;
+    if (typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)) {
+      const value = parsed as Record<string, unknown>;
+      const rawError = value.error;
+      if (typeof rawError === "object" && rawError !== null && !Array.isArray(rawError)) {
+        const error = rawError as Record<string, unknown>;
+        const parts: string[] = [];
+        if (typeof error.code === "number" || typeof error.code === "string") parts.push(`code=${String(error.code)}`);
+        if (typeof error.status === "string" && error.status) parts.push(`status=${error.status}`);
+        if (typeof error.message === "string" && error.message) parts.push(`message=${error.message}`);
+        if (parts.length > 0) detail = parts.join(" ");
+      }
+    }
+  } catch {
+    // Some SDK errors prepend status text before an embedded JSON body.
+  }
+
+  const redacted = redactUpstreamDetail(detail);
+  return redacted.length <= UPSTREAM_REJECTION_DETAIL_MAX_CHARS
+    ? redacted
+    : `${redacted.slice(0, UPSTREAM_REJECTION_DETAIL_MAX_CHARS - 1)}…`;
+}
+
 function finishJson(response: ServerResponse, value: unknown): void {
   if (response.writableEnded || response.destroyed) return;
   response.end(JSON.stringify(value));
@@ -538,6 +575,7 @@ export class RelayScheduler {
         offer_kind: offer.kind,
         scope: result.scope,
         status: result.httpStatus,
+        detail: upstreamRejectionDetail(result.bodyText),
       });
       if (isAutoModel(job.requestedModel)) {
         if (result.scope === "provider") job.excludedProviderIds.add(provider.id);

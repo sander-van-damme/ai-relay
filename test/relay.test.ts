@@ -1,7 +1,13 @@
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import test from "node:test";
-import { MAX_RETRYABLE_FAILURES_PER_PATH, optimizationWaitMs, RelayScheduler, selectOffer } from "../src/relay.ts";
+import {
+  MAX_RETRYABLE_FAILURES_PER_PATH,
+  optimizationWaitMs,
+  RelayScheduler,
+  selectOffer,
+  upstreamRejectionDetail,
+} from "../src/relay.ts";
 import type {
   OfferRequest,
   Provider,
@@ -141,6 +147,33 @@ class FakeProvider implements Provider {
     };
   }
 }
+
+test("upstream rejection details extract structured errors and redact secrets", () => {
+  assert.equal(
+    upstreamRejectionDetail(JSON.stringify({
+      error: {
+        code: 400,
+        status: "INVALID_ARGUMENT",
+        message: "Unsupported generation option.",
+      },
+    })),
+    "code=400 status=INVALID_ARGUMENT message=Unsupported generation option.",
+  );
+
+  const apiKey = "AIza12345678901234567890123456789012345";
+  const detail = upstreamRejectionDetail(`400 Bad Request using ${apiKey} and Bearer abc.def.ghi`);
+  assert.ok(detail);
+  assert.doesNotMatch(detail, /AIza/);
+  assert.doesNotMatch(detail, /abc\.def\.ghi/);
+  assert.match(detail, /REDACTED/);
+});
+
+test("upstream rejection details are bounded for journald", () => {
+  const detail = upstreamRejectionDetail("x".repeat(5_000));
+  assert.ok(detail);
+  assert.equal(detail.length, 1_000);
+  assert.ok(detail.endsWith("…"));
+});
 
 test("optimization wait halves after every failed execution", () => {
   assert.equal(optimizationWaitMs(0), 15_000);
