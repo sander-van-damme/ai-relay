@@ -20,7 +20,7 @@ cp .env.example .env
 sudo npm run install-service
 ```
 
-`install-service` creates the `ai-relay` system user when needed, copies the application to `/opt/ai-relay`, installs/enables the systemd unit, copies `.env` to `/etc/ai-relay.env`, restarts the service, and checks `/health`.
+`install-service` creates the `ai-relay` system user when needed, copies the application to `/opt/ai-relay`, installs its production npm dependencies there, installs/enables the systemd unit, copies `.env` to `/etc/ai-relay.env`, restarts the service, and checks `/health`. A separate manual `npm install` in `/opt/ai-relay` is not required.
 
 On later updates:
 
