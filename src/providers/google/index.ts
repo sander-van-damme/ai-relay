@@ -110,6 +110,7 @@ export const GOOGLE_MODELS: readonly GoogleModel[] = [
   { id: "google/gemini-3.1-flash-lite", upstreamModel: "gemini-3.1-flash-lite", contextWindowTokens: 1_048_576, quota: quota(15, 250_000, 500), preference: 700, transport: "interactions", thinkingLevels: ALL_THINKING },
   { id: "google/gemini-3-flash-preview", upstreamModel: "gemini-3-flash-preview", contextWindowTokens: 1_048_576, quota: quota(5, 250_000, 20), preference: 600, transport: "interactions", thinkingLevels: ALL_THINKING },
   { id: "google/gemini-robotics-er-2-preview", upstreamModel: "gemini-robotics-er-2-preview", contextWindowTokens: 131_072, quota: quota(5, 250_000, 20), preference: 500, transport: "interactions", thinkingLevels: ALL_THINKING },
+  // gemini-2.5-flash returned a Developer API 404 ("no longer available to new users") on 2026-10-01.
   { id: "google/gemini-2.5-flash-lite", upstreamModel: "gemini-2.5-flash-lite", contextWindowTokens: 1_048_576, quota: quota(10, 250_000, 20), preference: 300, transport: "interactions", thinkingLevels: NO_MINIMAL_THINKING },
   { id: "google/gemma-4-31b-it", upstreamModel: "gemma-4-31b-it", contextWindowTokens: 262_144, quota: quota(30, 16_000, 14_400), preference: 200, transport: "interactions" },
   { id: "google/gemma-4-26b-a4b-it", upstreamModel: "gemma-4-26b-a4b-it", contextWindowTokens: 262_144, quota: quota(30, 16_000, 14_400), preference: 100, transport: "interactions" },
