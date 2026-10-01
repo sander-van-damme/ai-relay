@@ -37,12 +37,10 @@ export interface GoogleInteractionRequest {
     max_output_tokens?: number;
     seed?: number;
     stop_sequences?: string[];
-    temperature?: number;
     thinking_level?: "minimal" | "low" | "medium" | "high";
     tool_choice?: "auto" | "any" | "none" | "validated" | {
       allowed_tools: { mode: "auto" | "any" | "none" | "validated"; tools?: string[] };
     };
-    top_p?: number;
   };
   response_format?: {
     type: "text";
@@ -184,10 +182,9 @@ function generationConfig(body: ChatCompletionRequest): GoogleInteractionRequest
   const maxOutputTokens = maxCompletionTokens ?? maxTokens;
   if (maxOutputTokens !== undefined) config.max_output_tokens = maxOutputTokens;
 
-  const temperature = numberField(body, "temperature");
-  if (temperature !== undefined) config.temperature = temperature;
-  const topP = numberField(body, "top_p");
-  if (topP !== undefined) config.top_p = topP;
+  if (body.temperature !== undefined || body.top_p !== undefined) {
+    throw new Error("temperature and top_p are not supported by the pinned Google Interactions SDK.");
+  }
   const seed = integerField(body, "seed");
   if (seed !== undefined) config.seed = seed;
 
