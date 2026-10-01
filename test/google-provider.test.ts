@@ -265,7 +265,7 @@ test("Antigravity uses the agent API with Search and caller-provided functions o
     assert.deepEqual(firstRequest.agent_config, {
       type: "antigravity",
       model: "gemini-3.8-flash",
-      max_total_tokens: "32000",
+      max_total_tokens: "32010",
     });
     assert.match(String(firstRequest.system_instruction), /reasoning backend for an OpenAI-compatible chat-completions interface/);
     assert.match(String(firstRequest.system_instruction), /Follow the task carefully/);
@@ -340,6 +340,10 @@ test("Antigravity still overrides default tools when the caller provides no func
 
     assert.deepEqual(requests[0]?.tools, [{ type: "google_search" }]);
     assert.equal(requests[0]?.environment, undefined);
+    assert.deepEqual(requests[0]?.agent_config, {
+      type: "antigravity",
+      model: "gemini-3.8-flash",
+    });
   } finally {
     if (originalKey === undefined) delete process.env.GEMINI_API_KEY;
     else process.env.GEMINI_API_KEY = originalKey;
