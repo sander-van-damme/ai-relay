@@ -251,6 +251,88 @@ test("Robotics uses native generateContent and preserves Google content for cont
   }
 });
 
+test("Robotics streaming is translated through native generateContentStream", async () => {
+  const originalKey = process.env.GEMINI_API_KEY;
+  process.env.GEMINI_API_KEY = "test";
+  const robotics = GOOGLE_MODELS.find((model) => model.id === "google/gemini-robotics-er-2-preview")!;
+
+  async function* generatedStream() {
+    yield {
+      responseId: "robot-stream-1",
+      createTime: "2026-10-01T08:00:00Z",
+      candidates: [{ content: { role: "model", parts: [{ text: "Move" }] } }],
+    };
+    yield {
+      responseId: "robot-stream-1",
+      candidates: [{
+        finishReason: "STOP",
+        content: { role: "model", parts: [{ text: " done", thoughtSignature: "stream-sig" }] },
+      }],
+      usageMetadata: { promptTokenCount: 10, candidatesTokenCount: 2, totalTokenCount: 12 },
+    };
+  }
+
+  try {
+    const client = fakeClient(() => generatedStream());
+    const provider = new GoogleProvider(() => client, [robotics]);
+    const body = {
+      messages: [{ role: "user", content: "Move" }],
+      stream_options: { include_usage: true },
+    };
+    const offer = (await provider.getBestOffer({
+      ...standardRequest,
+      body,
+      requestedModel: robotics.id,
+    }, Date.now()))!;
+    const result = await provider.execute(offer, body, true, new AbortController().signal);
+    assert.equal(result.status, "success");
+    if (result.status !== "success") return;
+    const text = await result.response.text();
+    result.release();
+
+    assert.match(text, /"content":"Move"/);
+    assert.match(text, /"content":" done"/);
+    assert.match(text, /"finish_reason":"stop"/);
+    assert.match(text, /"prompt_tokens":10/);
+    assert.match(text, /data: \[DONE\]/);
+  } finally {
+    if (originalKey === undefined) delete process.env.GEMINI_API_KEY;
+    else process.env.GEMINI_API_KEY = originalKey;
+  }
+});
+
+test("Google offer filtering respects model-specific thinking levels", async () => {
+  const originalKey = process.env.GEMINI_API_KEY;
+  process.env.GEMINI_API_KEY = "test";
+  try {
+    const models = GOOGLE_MODELS.filter((model) =>
+      model.id === "google/gemini-3.8-flash" || model.id === "google/gemini-3.6-flash"
+    );
+    const provider = new GoogleProvider(() => fakeClient(() => completedInteraction("unused")), models);
+    const body = {
+      messages: [{ role: "user", content: "Answer quickly" }],
+      reasoning_effort: "minimal",
+    };
+
+    const unsupported = await provider.getBestOffer({
+      ...standardRequest,
+      body,
+      requestedModel: "google/gemini-3.8-flash",
+    }, Date.now());
+    assert.equal(unsupported, null);
+
+    const supported = await provider.getBestOffer({
+      ...standardRequest,
+      body,
+      requestedModel: "google/gemini-3.6-flash",
+    }, Date.now());
+    assert.equal(supported?.modelId, "google/gemini-3.6-flash");
+  } finally {
+    if (originalKey === undefined) delete process.env.GEMINI_API_KEY;
+    else process.env.GEMINI_API_KEY = originalKey;
+  }
+});
+
 test("Google streaming is translated to OpenAI SSE chunks", async () => {
   const originalKey = process.env.GEMINI_API_KEY;
   process.env.GEMINI_API_KEY = "test";
