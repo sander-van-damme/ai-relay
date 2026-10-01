@@ -133,6 +133,8 @@ systemctl status ai-relay
 
 Useful scheduler fields include `failure_count`, `optimization_wait_ms`, `queue_bypasses`, provider/model selection, and total request time.
 
+Provider offer evaluation is logged structurally. At the default `LOG_LEVEL=info`, dispatches, upstream responses, failures, cooldown transitions, recovery, and confirmed/expired overflow boundaries are visible without logging every candidate evaluation. Set `LOG_LEVEL=debug` to also see `provider_offer` and `provider_no_offer` events for every provider offer pass, including offer kind, model, authoritative input tokens, effective capacity, availability, and structured no-offer reasons.
+
 ## Development
 
 ```bash
