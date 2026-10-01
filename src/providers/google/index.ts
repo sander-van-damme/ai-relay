@@ -985,42 +985,73 @@ export class GoogleProvider implements Provider {
 
     try {
       const continuation = this.continuationFor(body, model.upstreamModel);
-      const request: GoogleInteractionRequest = toGoogleInteractionRequest(
-        body,
-        model.upstreamModel,
-        stream,
-        continuation ? {
-          previousInteractionId: continuation.interactionId,
-          inputStartIndex: continuation.inputStartIndex,
-        } : undefined,
-      );
       const client = this.googleClient();
-      const result = await client.interactions.create(request as any, { fetchOptions: { signal } } as any);
+      let response: Response;
+
+      if (transportFor(model) === "generate-content") {
+        const request: GoogleGenerateContentRequest = toGoogleGenerateContentRequest(
+          body,
+          model.upstreamModel,
+          continuation?.generateContents ? {
+            contents: continuation.generateContents,
+            inputStartIndex: continuation.inputStartIndex,
+          } : undefined,
+        );
+        request.config = { ...request.config, abortSignal: signal };
+
+        if (stream) {
+          const result = await client.models.generateContentStream(request as any);
+          response = this.openAIGenerateStream(
+            result as unknown as AsyncIterable<unknown>,
+            offer,
+            body,
+            request.contents,
+            model.upstreamModel,
+          );
+        } else {
+          const result = await client.models.generateContent(request as any);
+          this.rememberGenerateContinuation(body, result, request.contents, model.upstreamModel);
+          response = new Response(JSON.stringify(googleGenerateContentToOpenAI(result, offer.modelId, offer.inputTokens)), {
+            status: 200,
+            headers: { "content-type": "application/json; charset=utf-8" },
+          });
+        }
+      } else {
+        const request: GoogleInteractionRequest = toGoogleInteractionRequest(
+          body,
+          model.upstreamModel,
+          stream,
+          continuation?.interactionId ? {
+            previousInteractionId: continuation.interactionId,
+            inputStartIndex: continuation.inputStartIndex,
+          } : undefined,
+        );
+        const result = await client.interactions.create(request as any, { fetchOptions: { signal } } as any);
+
+        if (stream) {
+          response = this.openAIStream(result as unknown as AsyncIterable<unknown>, offer, body);
+        } else {
+          const interaction = result as unknown;
+          const value = object(interaction);
+          if (value?.status === "failed" || value?.status === "cancelled") {
+            this.release(model);
+            return {
+              status: "rejected",
+              scope: "model",
+              httpStatus: 502,
+              bodyText: JSON.stringify({ error: value.errors ?? { message: `Google interaction ${value.status}.` } }),
+            };
+          }
+          this.rememberContinuation(body, interaction, model.upstreamModel);
+          response = new Response(JSON.stringify(googleInteractionToOpenAI(interaction, offer.modelId, offer.inputTokens)), {
+            status: 200,
+            headers: { "content-type": "application/json; charset=utf-8" },
+          });
+        }
+      }
 
       this.providerFailureCount = 0;
       this.modelFailureCounts.set(model.id, 0);
-      let response: Response;
-      if (stream) {
-        response = this.openAIStream(result as unknown as AsyncIterable<unknown>, offer, body);
-      } else {
-        const interaction = result as unknown;
-        const value = object(interaction);
-        if (value?.status === "failed" || value?.status === "cancelled") {
-          this.release(model);
-          return {
-            status: "rejected",
-            scope: "model",
-            httpStatus: 502,
-            bodyText: JSON.stringify({ error: value.errors ?? { message: `Google interaction ${value.status}.` } }),
-          };
-        }
-        this.rememberContinuation(body, interaction, model.upstreamModel);
-        response = new Response(JSON.stringify(googleInteractionToOpenAI(interaction, offer.modelId, offer.inputTokens)), {
-          status: 200,
-          headers: { "content-type": "application/json; charset=utf-8" },
-        });
-      }
-
       let released = false;
       return {
         status: "success",
