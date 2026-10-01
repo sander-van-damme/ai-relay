@@ -35,7 +35,7 @@ const CONTINUATION_TTL_MS = 60 * 60 * 1000;
 const MAX_CONTINUATIONS = 1_000;
 const OVERFLOW_LIMITS = new Set<QuotaLimitName>(["requestsPerDay"]);
 
-interface GoogleModel {
+export interface GoogleModel {
   id: string;
   upstreamModel: string;
   contextWindowTokens: number;
@@ -222,7 +222,7 @@ function errorBody(error: unknown): string {
 export class GoogleProvider implements Provider {
   readonly id = "google";
   readonly priority = 10;
-  private readonly models = GOOGLE_MODELS;
+  private readonly models: readonly GoogleModel[];
   private readonly modelStates = new Map<string, QuotaRuntimeState>();
   private readonly providerState = emptyQuotaState();
   private readonly tokenCountCache = new WeakMap<ChatCompletionRequest, Map<string, Promise<number>>>();
@@ -234,8 +234,12 @@ export class GoogleProvider implements Provider {
   private clientApiKey?: string;
   private readonly clientFactory: (apiKey: string) => GoogleGenAI;
 
-  constructor(clientFactory: (apiKey: string) => GoogleGenAI = (apiKey) => new GoogleGenAI({ apiKey })) {
+  constructor(
+    clientFactory: (apiKey: string) => GoogleGenAI = (apiKey) => new GoogleGenAI({ apiKey }),
+    models: readonly GoogleModel[] = GOOGLE_MODELS,
+  ) {
     this.clientFactory = clientFactory;
+    this.models = models;
     for (const model of this.models) this.modelStates.set(model.id, emptyQuotaState());
   }
 
