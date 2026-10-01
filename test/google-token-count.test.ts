@@ -312,6 +312,35 @@ test("Google continuation sends only messages after the stored interaction", () 
   ]);
 });
 
+test("Google Interactions continuation sends function results as text content blocks", () => {
+  const request = toGoogleInteractionRequest({
+    messages: [
+      { role: "user", content: "Inspect a.ts" },
+      {
+        role: "assistant",
+        content: null,
+        tool_calls: [{
+          id: "call_1",
+          type: "function",
+          function: { name: "read_file", arguments: "{\"path\":\"a.ts\"}" },
+        }],
+      },
+      { role: "tool", tool_call_id: "call_1", content: "file contents" },
+    ],
+  }, "gemini-3.8-flash", false, {
+    previousInteractionId: "interaction-with-call",
+    inputStartIndex: 2,
+  });
+
+  assert.equal(request.previous_interaction_id, "interaction-with-call");
+  assert.deepEqual(request.input, [{
+    type: "function_result",
+    name: "read_file",
+    call_id: "call_1",
+    result: [{ type: "text", text: "file contents" }],
+  }]);
+});
+
 test("Google token counting refuses content it cannot count authoritatively", () => {
   assert.throws(
     () => toGoogleCountInput({
