@@ -195,6 +195,7 @@ interface GoogleAgentInteractionRequest {
 function antigravityRequest(
   request: GoogleInteractionRequest,
   model: GoogleModel,
+  inputTokens: number,
 ): GoogleAgentInteractionRequest {
   if (!model.upstreamAgent) throw new Error(`Google model ${model.id} is not an agent route.`);
   const unsupported = Object.entries(request.generation_config ?? {})
@@ -208,12 +209,15 @@ function antigravityRequest(
   }
 
   const maxOutputTokens = request.generation_config?.max_output_tokens;
+  const maxTotalTokens = maxOutputTokens === undefined
+    ? undefined
+    : BigInt(inputTokens) + BigInt(maxOutputTokens);
   return {
     agent: model.upstreamAgent,
     agent_config: {
       type: "antigravity",
       model: model.upstreamModel,
-      ...(maxOutputTokens !== undefined ? { max_total_tokens: String(maxOutputTokens) } : {}),
+      ...(maxTotalTokens !== undefined ? { max_total_tokens: String(maxTotalTokens) } : {}),
     },
     input: request.input,
     store: true,
@@ -1173,7 +1177,7 @@ export class GoogleProvider implements Provider {
           } : undefined,
         );
         const interactionRequest = model.upstreamAgent
-          ? antigravityRequest(request, model)
+          ? antigravityRequest(request, model, offer.inputTokens)
           : request;
         const result = await client.interactions.create(interactionRequest as any, { fetchOptions: { signal } } as any);
 
