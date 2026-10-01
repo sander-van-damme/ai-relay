@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  GOOGLE_EXTERNAL_TOOL_THOUGHT_SIGNATURE,
+  toAntigravityBootstrapBody,
   toGoogleCountInput,
   toGoogleDeveloperCountTokensRequest,
   toGoogleGenerateContentRequest,
@@ -70,6 +72,67 @@ test("Google token counting maps OpenAI chat messages and tools to native conten
       parts: [{ functionResponse: { id: "call_1", name: "weather", response: { temperature: 18 } } }],
     },
   ]);
+});
+
+test("Antigravity bootstrap flattens historical tool traces into plain text", () => {
+  const body = toAntigravityBootstrapBody({
+    messages: [
+      { role: "system", content: "Work carefully." },
+      { role: "user", content: "Inspect the project." },
+      {
+        role: "assistant",
+        content: "I will read the file.",
+        tool_calls: [{
+          id: "call_1",
+          type: "function",
+          function: { name: "read_file", arguments: "{\"path\":\"a.ts\"}" },
+        }],
+      },
+      { role: "tool", tool_call_id: "call_1", content: "export const x = 1;" },
+      { role: "user", content: "Now fix it." },
+    ],
+    tools: [{
+      type: "function",
+      function: { name: "read_file", parameters: { type: "object" } },
+    }],
+  });
+
+  assert.deepEqual(body.messages?.slice(0, 1), [{ role: "system", content: "Work carefully." }]);
+  assert.equal(body.messages?.length, 2);
+  const bootstrap = body.messages?.[1] as Record<string, unknown>;
+  assert.equal(bootstrap.role, "user");
+  assert.match(String(bootstrap.content), /historical conversation context/i);
+  assert.match(String(bootstrap.content), /ASSISTANT TOOL CALL \[call_1\] read_file/);
+  assert.match(String(bootstrap.content), /TOOL RESULT \[call_1\]/);
+  assert.match(String(bootstrap.content), /Now fix it\./);
+});
+
+test("GenerateContent replay signs externally reconstructed function calls", () => {
+  const request = toGoogleGenerateContentRequest({
+    messages: [
+      { role: "user", content: "Inspect the project." },
+      {
+        role: "assistant",
+        content: null,
+        tool_calls: [{
+          id: "call_1",
+          type: "function",
+          function: { name: "read_file", arguments: "{\"path\":\"a.ts\"}" },
+        }],
+      },
+      { role: "tool", tool_call_id: "call_1", content: "file contents" },
+      { role: "user", content: "Continue." },
+    ],
+    tools: [{
+      type: "function",
+      function: { name: "read_file", parameters: { type: "object" } },
+    }],
+  }, "gemini-3.8-flash", undefined, true);
+
+  const modelContent = request.contents[1] as Record<string, unknown>;
+  const parts = modelContent.parts as Array<Record<string, unknown>>;
+  assert.equal(parts[0]?.thoughtSignature, GOOGLE_EXTERNAL_TOOL_THOUGHT_SIGNATURE);
+  assert.match(JSON.stringify(parts[0]?.functionCall), /read_file/);
 });
 
 test("Google Developer API token counting wraps the full generation request", () => {
