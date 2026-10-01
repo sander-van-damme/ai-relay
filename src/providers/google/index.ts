@@ -197,8 +197,12 @@ function antigravityRequest(
   model: GoogleModel,
 ): GoogleAgentInteractionRequest {
   if (!model.upstreamAgent) throw new Error(`Google model ${model.id} is not an agent route.`);
-  const unsupported = Object.keys(request.generation_config ?? {})
-    .filter((key) => key !== "max_output_tokens");
+  const unsupported = Object.entries(request.generation_config ?? {})
+    .filter(([key, value]) =>
+      key !== "max_output_tokens"
+      && !(key === "tool_choice" && value === "auto")
+    )
+    .map(([key]) => key);
   if (unsupported.length > 0) {
     throw new Error(`Antigravity does not support Chat Completions options: ${unsupported.join(", ")}.`);
   }
@@ -754,7 +758,7 @@ export class GoogleProvider implements Provider {
     assistant: JsonObject,
     modelContent: Content,
     requestContents: Content[],
-    upstreamModel: string,
+    upstreamTarget: string,
   ): void {
     const messages = messageArray(body);
     if (!messages) return;
@@ -923,7 +927,7 @@ export class GoogleProvider implements Provider {
     offer: ProviderOffer,
     body: ChatCompletionRequest,
     requestContents: Content[],
-    upstreamModel: string,
+    upstreamTarget: string,
   ): Response {
     const encoder = new TextEncoder();
     const provider = this;
