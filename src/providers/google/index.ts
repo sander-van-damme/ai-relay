@@ -729,9 +729,12 @@ export class GoogleProvider implements Provider {
           plan.replayExternalToolHistory,
         );
         contents = request.contents;
-      } else if (hasGoogleToolHistory(plan.body)) {
-        // Interactions continuation state contains native signatures that are not representable
-        // in OpenAI tool_calls. Count an equivalent replay-safe Gemini request instead.
+      } else if (
+        hasGoogleToolHistory(plan.body)
+        && (model.upstreamAgent || canReplayExternalToolHistory(model))
+      ) {
+        // Google-native signatures are not representable in OpenAI tool_calls.
+        // Count an equivalent replay-safe Gemini request instead.
         contents = toGoogleGenerateContentRequest(
           plan.body,
           model.upstreamModel,
