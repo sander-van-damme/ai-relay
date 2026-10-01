@@ -36,6 +36,8 @@ function fakeClient(create: (request: unknown) => unknown | Promise<unknown>): G
   return {
     models: {
       countTokens: async () => ({ totalTokens: 10 }),
+      generateContent: async (request: unknown) => create(request),
+      generateContentStream: async (request: unknown) => create(request),
     },
     interactions: {
       create: async (request: unknown) => create(request),
@@ -80,6 +82,8 @@ test("Google catalog contains every non-zero text-output model from the AI Studi
   assert.equal(robotics.quota.limits.requestsPerMinute, 5);
   assert.equal(robotics.quota.limits.inputTokensPerMinute, 250_000);
   assert.equal(robotics.quota.limits.requestsPerDay, 20);
+  assert.equal(robotics.transport, "generate-content");
+  assert.deepEqual(robotics.thinkingLevels, ["minimal", "low", "medium", "high"]);
 
   const flashLite = GOOGLE_MODELS.find((model) => model.id === "google/gemini-3.5-flash-lite")!;
   assert.equal(flashLite.quota.limits.requestsPerMinute, 15);
@@ -169,6 +173,78 @@ test("Google execution uses the official Interactions API and reuses stored cont
     assert.deepEqual(secondRequest.input, [
       { type: "user_input", content: [{ type: "text", text: "And again?" }] },
     ]);
+  } finally {
+    if (originalKey === undefined) delete process.env.GEMINI_API_KEY;
+    else process.env.GEMINI_API_KEY = originalKey;
+  }
+});
+
+test("Robotics uses native generateContent and preserves Google content for continuation", async () => {
+  const originalKey = process.env.GEMINI_API_KEY;
+  process.env.GEMINI_API_KEY = "test";
+  const robotics = GOOGLE_MODELS.find((model) => model.id === "google/gemini-robotics-er-2-preview")!;
+  const requests: Array<Record<string, unknown>> = [];
+  let call = 0;
+  const client = fakeClient((request) => {
+    requests.push(request as Record<string, unknown>);
+    call += 1;
+    return {
+      responseId: `robot-${call}`,
+      createTime: "2026-10-01T08:00:00Z",
+      candidates: [{
+        finishReason: "STOP",
+        content: {
+          role: "model",
+          parts: [{ text: call === 1 ? "Move complete" : "Second move", thoughtSignature: `sig-${call}` }],
+        },
+      }],
+      usageMetadata: {
+        promptTokenCount: 10,
+        candidatesTokenCount: 2,
+        totalTokenCount: 12,
+      },
+    };
+  });
+
+  try {
+    const provider = new GoogleProvider(() => client, [robotics]);
+    const firstBody = { messages: [{ role: "user", content: "Move once" }] };
+    const firstOffer = (await provider.getBestOffer({
+      ...standardRequest,
+      body: firstBody,
+      requestedModel: robotics.id,
+    }, Date.now()))!;
+    const firstResult = await provider.execute(firstOffer, firstBody, false, new AbortController().signal);
+    assert.equal(firstResult.status, "success");
+    if (firstResult.status !== "success") return;
+    const firstPayload = await firstResult.response.json() as Record<string, unknown>;
+    const firstChoices = firstPayload.choices as Array<Record<string, unknown>>;
+    assert.deepEqual(firstChoices[0]?.message, { role: "assistant", content: "Move complete" });
+    firstResult.release();
+
+    const secondBody = {
+      messages: [
+        { role: "user", content: "Move once" },
+        { role: "assistant", content: "Move complete" },
+        { role: "user", content: "Move again" },
+      ],
+    };
+    const secondOffer = (await provider.getBestOffer({
+      ...standardRequest,
+      body: secondBody,
+      requestedModel: robotics.id,
+    }, Date.now()))!;
+    const secondResult = await provider.execute(secondOffer, secondBody, false, new AbortController().signal);
+    assert.equal(secondResult.status, "success");
+    if (secondResult.status === "success") secondResult.release();
+
+    assert.equal(requests[0]?.model, "gemini-robotics-er-2-preview");
+    const secondContents = requests[1]?.contents as Array<Record<string, unknown>>;
+    assert.equal(secondContents.length, 3);
+    const savedModel = secondContents[1] as Record<string, unknown>;
+    const savedParts = savedModel.parts as Array<Record<string, unknown>>;
+    assert.equal(savedParts[0]?.thoughtSignature, "sig-1");
+    assert.deepEqual(secondContents[2], { role: "user", parts: [{ text: "Move again" }] });
   } finally {
     if (originalKey === undefined) delete process.env.GEMINI_API_KEY;
     else process.env.GEMINI_API_KEY = originalKey;
