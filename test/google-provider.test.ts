@@ -256,6 +256,7 @@ test("Antigravity uses the agent API with Search and caller-provided functions o
     assert.equal(countRequests[0]?.model, "gemini-3.8-flash");
     const countConfig = countRequests[0]?.config as Record<string, unknown>;
     assert.match(JSON.stringify(countConfig.systemInstruction), /reasoning backend for an OpenAI-compatible chat-completions interface/);
+    assert.match(JSON.stringify(countConfig.tools), /googleSearch/);
 
     const firstRequest = requests[0]!;
     assert.equal(firstRequest.agent, "antigravity-preview-09-2026");
