@@ -1271,7 +1271,7 @@ export class GoogleProvider implements Provider {
   }
 
   status(now = Date.now()): ProviderStatus {
-    this.pruneOverflowBlocks(now);
+    this.pruneOverflowBlocks(Date.now());
     return {
       id: this.id,
       configured: this.isConfigured(),
