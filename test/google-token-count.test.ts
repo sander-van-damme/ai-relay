@@ -61,11 +61,11 @@ test("Google token counting maps OpenAI chat messages and tools to native conten
     { role: "user", parts: [{ text: "What is the weather?" }] },
     {
       role: "model",
-      parts: [{ functionCall: { name: "weather", args: { city: "Ghent" } } }],
+      parts: [{ functionCall: { id: "call_1", name: "weather", args: { city: "Ghent" } } }],
     },
     {
       role: "user",
-      parts: [{ functionResponse: { name: "weather", response: { temperature: 18 } } }],
+      parts: [{ functionResponse: { id: "call_1", name: "weather", response: { temperature: 18 } } }],
     },
   ]);
 });
