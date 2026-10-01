@@ -167,12 +167,27 @@ export class RelayScheduler {
           maxOptimizationWaitMs: maxWait,
           excludedModelIds,
         }, now);
-        if (result.status === "no_offer" && result.reason === "token_count_failed") {
-          log("warn", "provider_offer_error", {
+        if (result.status === "offer") {
+          log("debug", "provider_offer", {
+            request_id: job.id,
+            provider: provider.id,
+            relay_model: result.offer.modelId,
+            offer_kind: offerKind,
+            input_tokens: result.offer.inputTokens,
+            input_capacity_tokens: result.offer.inputCapacityTokens,
+            available_at: Number.isFinite(result.offer.availableAt)
+              ? new Date(result.offer.availableAt).toISOString()
+              : null,
+            avoid_last_failure: avoidLastFailure,
+          });
+        } else {
+          log(result.reason === "token_count_failed" ? "warn" : "debug", "provider_no_offer", {
             request_id: job.id,
             provider: provider.id,
             offer_kind: offerKind,
-            error: result.detail ?? "Authoritative input token count failed.",
+            reason: result.reason,
+            detail: result.detail ?? null,
+            avoid_last_failure: avoidLastFailure,
           });
         }
         return result;
