@@ -90,7 +90,7 @@ const NO_MINIMAL_THINKING: readonly GoogleThinkingLevel[] = ["low", "medium", "h
 export const GOOGLE_MODELS: readonly GoogleModel[] = [
   { id: "google/gemma-4-26b-a4b-it", upstreamModel: "gemma-4-26b-a4b-it", contextWindowTokens: 262_144, quota: quota(30, 16_000, 14_400), transport: "interactions" },
   { id: "google/gemma-4-31b-it", upstreamModel: "gemma-4-31b-it", contextWindowTokens: 262_144, quota: quota(30, 16_000, 14_400), transport: "interactions" },
-  { id: "google/gemini-robotics-er-2-preview", upstreamModel: "gemini-robotics-er-2-preview", contextWindowTokens: 131_072, quota: quota(5, 250_000, 20), transport: "generate-content", thinkingLevels: ALL_THINKING },
+  { id: "google/gemini-robotics-er-2-preview", upstreamModel: "gemini-robotics-er-2-preview", contextWindowTokens: 131_072, quota: quota(5, 250_000, 20), transport: "interactions", thinkingLevels: ALL_THINKING },
   { id: "google/gemini-3.5-flash-lite", upstreamModel: "gemini-3.5-flash-lite", contextWindowTokens: 1_048_576, quota: quota(15, 250_000, 500), transport: "interactions", thinkingLevels: ALL_THINKING },
   { id: "google/gemini-3.1-flash-lite", upstreamModel: "gemini-3.1-flash-lite", contextWindowTokens: 1_048_576, quota: quota(15, 250_000, 500), transport: "interactions", thinkingLevels: ALL_THINKING },
   { id: "google/gemini-2.5-flash-lite", upstreamModel: "gemini-2.5-flash-lite", contextWindowTokens: 1_048_576, quota: quota(10, 250_000, 20), transport: "interactions", thinkingLevels: NO_MINIMAL_THINKING },
@@ -354,6 +354,19 @@ function errorBody(error: unknown): string {
     try { return JSON.stringify(value.error); } catch { /* ignore */ }
   }
   return error instanceof Error ? error.message : String(error);
+}
+
+function confirmsDailyQuota(error: unknown): boolean {
+  const value = object(error);
+  const code = typeof value?.code === "string" ? value.code : "";
+  const message = error instanceof Error ? error.message : "";
+  const text = `${code} ${message} ${errorBody(error)}`.toLowerCase();
+
+  return text.includes("quota_exceeded")
+    || text.includes("generaterequestsperday")
+    || text.includes("requestsperday")
+    || text.includes("requests per day")
+    || text.includes("daily quota");
 }
 
 export class GoogleProvider implements Provider {
@@ -961,7 +974,8 @@ export class GoogleProvider implements Provider {
     const failedAt = Date.now();
 
     if (code === 429) {
-      if (offer.kind === "overflow") {
+      const dailyOverflowConfirmed = offer.kind === "overflow" && confirmsDailyQuota(error);
+      if (dailyOverflowConfirmed) {
         this.modelOverflowBlockedUntil.set(
           model.id,
           Math.max(this.modelOverflowBlockedUntil.get(model.id) ?? 0, failedAt + OVERFLOW_HARD_CAP_TTL_MS),
@@ -970,7 +984,7 @@ export class GoogleProvider implements Provider {
       return {
         status: "retryable",
         scope: "model",
-        reason: offer.kind === "overflow" ? "overflow_limit_confirmed" : "rate_limit",
+        reason: dailyOverflowConfirmed ? "overflow_limit_confirmed" : "rate_limit",
         retryAt: this.blockModel(model, retryAfterMs, failedAt),
       };
     }
