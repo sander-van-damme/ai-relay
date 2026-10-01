@@ -8,6 +8,7 @@ import type {
   ProviderExecutionResult,
   ProviderModelInfo,
   ProviderOffer,
+  ProviderOfferResult,
   ProviderStatus,
 } from "../src/providers/index.ts";
 import type { ChatCompletionRequest, RelayConfig, RelayJob } from "../src/types.ts";
@@ -79,27 +80,38 @@ class FakeProvider implements Provider {
   listModels(): readonly ProviderModelInfo[] {
     return [{ id: `${this.id}/model`, providerId: this.id, inputCapacityTokens: this.capacity }];
   }
-  async countInputTokens(body: ChatCompletionRequest, modelId: string): Promise<number> {
-    if (modelId !== `${this.id}/model`) throw new Error(`Unknown model: ${modelId}`);
-    return Number(body.testInputTokens ?? 10);
-  }
-  async getBestOffer(request: OfferRequest, now = Date.now()): Promise<ProviderOffer | null> {
-    if (request.offerKind === "overflow" && !this.supportsOverflow) return null;
-    if (request.requestedModel !== "auto" && request.requestedModel !== `${this.id}/model`) return null;
-    const inputTokens = await this.countInputTokens(request.body, `${this.id}/model`);
-    if (request.excludedModelIds.has(`${this.id}/model`) || inputTokens > this.capacity) return null;
+  async getBestOffer(request: OfferRequest, now = Date.now()): Promise<ProviderOfferResult> {
+    const modelId = `${this.id}/model`;
+    if (request.offerKind === "overflow" && !this.supportsOverflow) {
+      return { status: "no_offer", providerId: this.id, reason: "no_eligible_model" };
+    }
+    if (
+      request.excludedModelIds.has(modelId)
+      || (request.requestedModel !== "auto" && request.requestedModel !== modelId)
+    ) {
+      return { status: "no_offer", providerId: this.id, reason: "no_eligible_model" };
+    }
+
+    const inputTokens = Number(request.body.testInputTokens ?? 10);
+    if (inputTokens > this.capacity) {
+      return { status: "no_offer", providerId: this.id, reason: "request_exceeds_capacity" };
+    }
+
     return {
-      kind: request.offerKind,
-      providerId: this.id,
-      providerPriority: this.priority,
-      modelId: `${this.id}/model`,
-      inputTokens,
-      inputCapacityTokens: this.capacity,
-      availableAt: request.offerKind === "overflow"
-        ? now
-        : this.active
-          ? Number.POSITIVE_INFINITY
-          : Math.max(now, this.standardAvailableAt, this.blockedUntil),
+      status: "offer",
+      offer: {
+        kind: request.offerKind,
+        providerId: this.id,
+        providerPriority: this.priority,
+        modelId,
+        inputTokens,
+        inputCapacityTokens: this.capacity,
+        availableAt: request.offerKind === "overflow"
+          ? now
+          : this.active
+            ? Number.POSITIVE_INFINITY
+            : Math.max(now, this.standardAvailableAt, this.blockedUntil),
+      },
     };
   }
   async execute(
@@ -230,4 +242,18 @@ test("overflow is used as an immediate last resort before a long quota wait", as
   assert.deepEqual(p.executionOrder, ["A"]);
   assert.deepEqual(p.executionKinds, ["overflow"]);
   assert.equal(response.writableEnded, true);
+});
+
+
+test("terminal capacity errors use provider offer assessments", async () => {
+  const p = new FakeProvider("only", 10, 5);
+  const scheduler = new RelayScheduler(config(), [p]);
+  const response = new FakeResponse();
+  scheduler.enqueue(job("too-large", response));
+
+  await new Promise((resolve) => setTimeout(resolve, 20));
+
+  assert.equal(response.writableEnded, true);
+  assert.match(response.body, /request_exceeds_provider_capacity/);
+  assert.deepEqual(p.executionOrder, []);
 });
