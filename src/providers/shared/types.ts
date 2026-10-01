@@ -24,7 +24,8 @@ export type ProviderNoOfferReason =
   | "provider_not_configured"
   | "no_eligible_model"
   | "request_exceeds_capacity"
-  | "token_count_failed";
+  | "token_count_failed"
+  | "offer_evaluation_failed";
 
 export type ProviderOfferResult =
   | {
