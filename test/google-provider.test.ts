@@ -78,7 +78,7 @@ function completedInteraction(id: string, text = "Hello back") {
   };
 }
 
-test("Google catalog contains every eligible route from the AI Studio limits", () => {
+test("Google catalog contains eligible routes and excludes retired models", () => {
   assert.deepEqual(GOOGLE_MODELS.map((model) => model.id), [
     "google/gemini-3.8-flash",
     "google/antigravity-preview-09-2026",
@@ -89,7 +89,6 @@ test("Google catalog contains every eligible route from the AI Studio limits", (
     "google/gemini-3.1-flash-lite",
     "google/gemini-3-flash-preview",
     "google/gemini-robotics-er-2-preview",
-    "google/gemini-2.5-flash",
     "google/gemini-2.5-flash-lite",
     "google/gemma-4-31b-it",
     "google/gemma-4-26b-a4b-it",
@@ -111,6 +110,8 @@ test("Google catalog contains every eligible route from the AI Studio limits", (
   assert.equal(robotics.quota.limits.requestsPerDay, 20);
   assert.equal(robotics.transport, "interactions");
   assert.deepEqual(robotics.thinkingLevels, ["minimal", "low", "medium", "high"]);
+
+  assert.equal(GOOGLE_MODELS.some((model) => model.id === "google/gemini-2.5-flash"), false);
 
   const flashLite = GOOGLE_MODELS.find((model) => model.id === "google/gemini-3.5-flash-lite")!;
   assert.equal(flashLite.quota.limits.requestsPerMinute, 15);
