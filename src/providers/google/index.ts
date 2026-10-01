@@ -1361,6 +1361,7 @@ export class GoogleProvider implements Provider {
       const plan = this.requestPlan(body, model);
       if (plan.bootstrapAntigravity || plan.replayExternalToolHistory) {
         log("info", "google_history_recovery", {
+          provider: this.id,
           relay_model: model.id,
           mode: plan.bootstrapAntigravity ? "antigravity_transcript" : "generate_content_replay",
         });
