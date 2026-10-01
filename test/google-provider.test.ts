@@ -91,7 +91,7 @@ test("Google catalog contains every non-zero text-output model from the AI Studi
   assert.equal(robotics.quota.limits.requestsPerMinute, 5);
   assert.equal(robotics.quota.limits.inputTokensPerMinute, 250_000);
   assert.equal(robotics.quota.limits.requestsPerDay, 20);
-  assert.equal(robotics.transport, "generate-content");
+  assert.equal(robotics.transport, "interactions");
   assert.deepEqual(robotics.thinkingLevels, ["minimal", "low", "medium", "high"]);
 
   const flashLite = GOOGLE_MODELS.find((model) => model.id === "google/gemini-3.5-flash-lite")!;
@@ -188,10 +188,10 @@ test("Google execution uses the official Interactions API and reuses stored cont
   }
 });
 
-test("Robotics uses native generateContent and preserves Google content for continuation", async () => {
+test("generateContent fallback preserves Google content for continuation", async () => {
   const originalKey = process.env.GEMINI_API_KEY;
   process.env.GEMINI_API_KEY = "test";
-  const robotics = GOOGLE_MODELS.find((model) => model.id === "google/gemini-robotics-er-2-preview")!;
+  const robotics = { ...GOOGLE_MODELS.find((model) => model.id === "google/gemini-robotics-er-2-preview")!, transport: "generate-content" as const };
   const requests: Array<Record<string, unknown>> = [];
   let call = 0;
   const client = fakeClient((request) => {
@@ -260,10 +260,10 @@ test("Robotics uses native generateContent and preserves Google content for cont
   }
 });
 
-test("Robotics streaming is translated through native generateContentStream", async () => {
+test("generateContent fallback streaming is translated to OpenAI SSE", async () => {
   const originalKey = process.env.GEMINI_API_KEY;
   process.env.GEMINI_API_KEY = "test";
-  const robotics = GOOGLE_MODELS.find((model) => model.id === "google/gemini-robotics-er-2-preview")!;
+  const robotics = { ...GOOGLE_MODELS.find((model) => model.id === "google/gemini-robotics-er-2-preview")!, transport: "generate-content" as const };
 
   async function* generatedStream() {
     yield {
@@ -397,7 +397,7 @@ test("Google overflow only bypasses RPD and a 429 blocks that model for exactly 
     throw Object.assign(new Error("quota exhausted"), {
       statusCode: 429,
       headers: new Headers(),
-      body: '{"error":"quota exhausted"}',
+      body: '{"error":{"status":"RESOURCE_EXHAUSTED","quotaId":"GenerateRequestsPerDayPerProjectPerModel-FreeTier"}}',
     });
   });
 
@@ -435,6 +435,44 @@ test("Google overflow only bypasses RPD and a 429 blocks that model for exactly 
     assert.ok(blockedUntil! <= Date.now() + 24 * 60 * 60 * 1000);
     assert.equal(provider.status(blockedUntil! - 1).models[0]?.overflowBlockedUntil, blockedUntil);
     assert.equal(provider.status(blockedUntil!).models[0]?.overflowBlockedUntil, null);
+  } finally {
+    if (originalKey === undefined) delete process.env.GEMINI_API_KEY;
+    else process.env.GEMINI_API_KEY = originalKey;
+  }
+});
+
+test("a generic overflow 429 does not prove the daily overflow boundary", async () => {
+  const originalKey = process.env.GEMINI_API_KEY;
+  process.env.GEMINI_API_KEY = "test";
+  let createCalls = 0;
+  const client = fakeClient(() => {
+    createCalls += 1;
+    if (createCalls === 1) return completedInteraction("first");
+    throw Object.assign(new Error("Resource has been exhausted"), {
+      statusCode: 429,
+      headers: new Headers(),
+      body: '{"error":{"status":"RESOURCE_EXHAUSTED","message":"Resource has been exhausted"}}',
+    });
+  });
+
+  try {
+    const provider = new GoogleProvider(() => client, [TEST_MODEL]);
+    const firstOffer = (await bestOffer(provider, standardRequest, Date.now()))!;
+    const firstResult = await provider.execute(firstOffer, standardRequest.body, false, new AbortController().signal);
+    if (firstResult.status === "success") firstResult.release();
+
+    const overflow = (await bestOffer(
+      provider,
+      { ...standardRequest, offerKind: "overflow" },
+      Date.now(),
+    ))!;
+    const failed = await provider.execute(overflow, standardRequest.body, false, new AbortController().signal);
+    assert.equal(failed.status, "retryable");
+    if (failed.status === "retryable") {
+      assert.equal(failed.scope, "model");
+      assert.equal(failed.reason, "rate_limit");
+    }
+    assert.equal(provider.status().models[0]?.overflowBlockedUntil, null);
   } finally {
     if (originalKey === undefined) delete process.env.GEMINI_API_KEY;
     else process.env.GEMINI_API_KEY = originalKey;
