@@ -31,7 +31,12 @@ export type GoogleInteractionStep =
   | { type: "user_input"; content: Array<{ type: "text"; text: string }> }
   | { type: "model_output"; content: Array<{ type: "text"; text: string }> }
   | { type: "function_call"; id: string; name: string; arguments: JsonObject }
-  | { type: "function_result"; call_id: string; name?: string; result: string };
+  | {
+      type: "function_result";
+      call_id: string;
+      name?: string;
+      result: Array<{ type: "text"; text: string }>;
+    };
 
 export interface GoogleGenerateContentRequest {
   model: string;
@@ -419,7 +424,12 @@ function normalize(body: ChatCompletionRequest, inputStartIndex = 0): Normalized
       }
       contents.push({ role: "user", parts: [{ functionResponse: { id: message.tool_call_id, name, response } }] });
       if (messageIndex >= inputStartIndex) {
-        steps.push({ type: "function_result", call_id: message.tool_call_id, name, result });
+        steps.push({
+          type: "function_result",
+          call_id: message.tool_call_id,
+          name,
+          result: [{ type: "text", text: result }],
+        });
       }
       continue;
     }
