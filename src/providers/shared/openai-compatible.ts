@@ -1,3 +1,4 @@
+import { log } from "../../log.ts";
 import {
   effectiveInputCapacity,
   emptyQuotaState,
@@ -302,7 +303,7 @@ export class OpenAICompatibleProvider implements Provider {
     if (this.providerQuota) releaseQuota(this.providerState);
   }
 
-  private blockModel(model: ManagedModel, requestedDelayMs: number, now: number): number {
+  private blockModel(model: ManagedModel, requestedDelayMs: number, now: number, reason: string): number {
     const failures = (this.modelFailureCounts.get(model.id) ?? 0) + 1;
     this.modelFailureCounts.set(model.id, failures);
     const multiplier = 2 ** Math.min(failures - 1, 4);
@@ -310,10 +311,17 @@ export class OpenAICompatibleProvider implements Provider {
     const retryAt = now + delayMs;
     const state = this.modelState(model.id);
     state.blockedUntil = Math.max(state.blockedUntil, retryAt);
+    log("warn", "provider_model_cooldown", {
+      provider: this.id,
+      relay_model: model.id,
+      reason,
+      consecutive_failures: failures,
+      blocked_until: new Date(state.blockedUntil).toISOString(),
+    });
     return retryAt;
   }
 
-  private blockProvider(requestedDelayMs: number, now: number): number {
+  private blockProvider(requestedDelayMs: number, now: number, reason: string): number {
     this.providerFailureCount += 1;
     const multiplier = 2 ** Math.min(this.providerFailureCount - 1, 4);
     const delayMs = Math.min(
@@ -322,6 +330,12 @@ export class OpenAICompatibleProvider implements Provider {
     );
     const retryAt = now + delayMs;
     this.providerState.blockedUntil = Math.max(this.providerState.blockedUntil, retryAt);
+    log("warn", "provider_cooldown", {
+      provider: this.id,
+      reason,
+      consecutive_failures: this.providerFailureCount,
+      blocked_until: new Date(this.providerState.blockedUntil).toISOString(),
+    });
     return retryAt;
   }
 
@@ -360,18 +374,29 @@ export class OpenAICompatibleProvider implements Provider {
       });
     } catch (error) {
       this.release(model);
-      const retryAt = this.blockProvider(this.defaultRetryMs, Date.now());
+      const reason = error instanceof Error ? `network:${error.message}` : "network_error";
+      const retryAt = this.blockProvider(this.defaultRetryMs, Date.now(), reason);
       return {
         status: "retryable",
         scope: "provider",
-        reason: error instanceof Error ? `network:${error.message}` : "network_error",
+        reason,
         retryAt,
       };
     }
 
     if (response.ok) {
+      const providerFailures = this.providerFailureCount;
+      const modelFailures = this.modelFailureCounts.get(model.id) ?? 0;
       this.providerFailureCount = 0;
       this.modelFailureCounts.set(model.id, 0);
+      if (providerFailures > 0 || modelFailures > 0) {
+        log("info", "provider_recovered", {
+          provider: this.id,
+          relay_model: model.id,
+          provider_failures: providerFailures,
+          model_failures: modelFailures,
+        });
+      }
       let released = false;
       return {
         status: "success",
@@ -397,24 +422,31 @@ export class OpenAICompatibleProvider implements Provider {
           Math.max(this.modelOverflowBlockedUntil.get(model.id) ?? 0, blockedUntil),
         );
       }
+      const reason = offer.kind === "overflow" ? "overflow_limit_confirmed" : "rate_limit";
       return {
         status: "retryable",
         scope: "model",
-        reason: offer.kind === "overflow" ? "overflow_limit_confirmed" : "rate_limit",
-        retryAt: this.blockModel(model, retryAfterMs, failedAt),
+        reason,
+        retryAt: this.blockModel(model, retryAfterMs, failedAt, reason),
       };
     }
     if (response.status === 408 || response.status >= 500) {
+      const reason = `upstream_${response.status}`;
       return {
         status: "retryable",
         scope: "provider",
-        reason: `upstream_${response.status}`,
-        retryAt: this.blockProvider(retryAfterMs, Date.now()),
+        reason,
+        retryAt: this.blockProvider(retryAfterMs, Date.now(), reason),
       };
     }
 
     if (response.status === 401 || response.status === 403) {
       this.providerState.blockedUntil = Math.max(this.providerState.blockedUntil, Date.now() + 60_000);
+      log("warn", "provider_cooldown", {
+        provider: this.id,
+        reason: `upstream_${response.status}`,
+        blocked_until: new Date(this.providerState.blockedUntil).toISOString(),
+      });
       return { status: "rejected", scope: "provider", httpStatus: response.status, bodyText };
     }
     return { status: "rejected", scope: "model", httpStatus: response.status, bodyText };

@@ -7,6 +7,7 @@ import {
   googleInteractionToOpenAI,
   type GoogleModel,
 } from "../src/providers/google/index.ts";
+import { calendarDayBounds } from "../src/providers/shared/quota.ts";
 
 const TEST_MODEL: GoogleModel = {
   id: "google/test-model",
@@ -611,7 +612,7 @@ test("Google streaming is translated to OpenAI SSE chunks", async () => {
   }
 });
 
-test("Google overflow only bypasses RPD and a 429 blocks that model for exactly 24 hours", async () => {
+test("Google confirmed RPD overflow is blocked only until the next Pacific midnight", async () => {
   const originalKey = process.env.GEMINI_API_KEY;
   process.env.GEMINI_API_KEY = "test";
   let createCalls = 0;
@@ -655,8 +656,10 @@ test("Google overflow only bypasses RPD and a 429 blocks that model for exactly 
 
     const blockedUntil = provider.status().models[0]?.overflowBlockedUntil;
     assert.ok(blockedUntil !== null && blockedUntil !== undefined);
-    assert.ok(blockedUntil! >= beforeFailure + 24 * 60 * 60 * 1000);
-    assert.ok(blockedUntil! <= Date.now() + 24 * 60 * 60 * 1000);
+    const expectedReset = calendarDayBounds(beforeFailure, "America/Los_Angeles").end;
+    assert.equal(blockedUntil, expectedReset);
+    assert.ok(blockedUntil! > beforeFailure);
+    assert.ok(blockedUntil! - beforeFailure <= 24 * 60 * 60 * 1000);
     assert.equal(provider.status(blockedUntil! - 1).models[0]?.overflowBlockedUntil, blockedUntil);
     assert.equal(provider.status(blockedUntil!).models[0]?.overflowBlockedUntil, null);
   } finally {
