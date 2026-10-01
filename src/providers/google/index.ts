@@ -593,6 +593,47 @@ export class GoogleProvider implements Provider {
     this.pruneContinuations();
   }
 
+  private rememberGenerateContinuation(
+    body: ChatCompletionRequest,
+    response: unknown,
+    requestContents: Content[],
+    upstreamModel: string,
+  ): void {
+    const messages = messageArray(body);
+    if (!messages) return;
+    const generated = generateAssistant(response);
+    if (!generated.modelContent) return;
+    const continued = [...messages, generated.assistant];
+    this.continuations.delete(prefixKey(continued));
+    this.continuations.set(prefixKey(continued), {
+      generateContents: [...requestContents, generated.modelContent],
+      inputStartIndex: continued.length,
+      upstreamModel,
+      expiresAt: Date.now() + CONTINUATION_TTL_MS,
+    });
+    this.pruneContinuations();
+  }
+
+  private rememberGenerateStreamContinuation(
+    body: ChatCompletionRequest,
+    assistant: JsonObject,
+    modelContent: Content,
+    requestContents: Content[],
+    upstreamModel: string,
+  ): void {
+    const messages = messageArray(body);
+    if (!messages) return;
+    const continued = [...messages, assistant];
+    this.continuations.delete(prefixKey(continued));
+    this.continuations.set(prefixKey(continued), {
+      generateContents: [...requestContents, modelContent],
+      inputStartIndex: continued.length,
+      upstreamModel,
+      expiresAt: Date.now() + CONTINUATION_TTL_MS,
+    });
+    this.pruneContinuations();
+  }
+
   private openAIStream(
     stream: AsyncIterable<unknown>,
     offer: ProviderOffer,
