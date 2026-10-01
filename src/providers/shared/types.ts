@@ -20,6 +20,25 @@ export interface ProviderOffer {
   availableAt: number;
 }
 
+export type ProviderNoOfferReason =
+  | "provider_not_configured"
+  | "no_eligible_model"
+  | "request_exceeds_capacity"
+  | "token_count_failed"
+  | "offer_evaluation_failed";
+
+export type ProviderOfferResult =
+  | {
+      status: "offer";
+      offer: ProviderOffer;
+    }
+  | {
+      status: "no_offer";
+      providerId: string;
+      reason: ProviderNoOfferReason;
+      detail?: string;
+    };
+
 export interface ProviderModelInfo {
   id: string;
   providerId: string;
@@ -64,8 +83,7 @@ export interface Provider {
   readonly priority: number;
   isConfigured(): boolean;
   listModels(): readonly ProviderModelInfo[];
-  countInputTokens(body: ChatCompletionRequest, modelId: string): Promise<number>;
-  getBestOffer(request: OfferRequest, now?: number): Promise<ProviderOffer | null>;
+  getBestOffer(request: OfferRequest, now?: number): Promise<ProviderOfferResult>;
   execute(
     offer: ProviderOffer,
     body: ChatCompletionRequest,

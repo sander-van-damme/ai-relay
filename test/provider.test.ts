@@ -40,6 +40,15 @@ const autoRequest = {
   excludedModelIds: new Set<string>(),
 };
 
+async function bestOffer(
+  provider: OpenAICompatibleProvider,
+  request: Parameters<OpenAICompatibleProvider["getBestOffer"]>[0],
+  now?: number,
+) {
+  const result = await provider.getBestOffer(request, now);
+  return result.status === "offer" ? result.offer : null;
+}
+
 test("provider uses the smallest effective capacity that fits within the wait cutoff", async () => {
   const originalKey = process.env.TEST_PROVIDER_KEY;
   const originalFetch = globalThis.fetch;
@@ -48,16 +57,16 @@ test("provider uses the smallest effective capacity that fits within the wait cu
   try {
     const p = provider();
     const base = Date.now();
-    const first = (await p.getBestOffer({ ...autoRequest, body: { ...autoRequest.body, testInputTokens: 100 } }, base))!;
+    const first = (await bestOffer(p, { ...autoRequest, body: { ...autoRequest.body, testInputTokens: 100 } }, base))!;
     assert.equal(first?.modelId, "test/small");
     const result = await p.execute(first!, { messages: [] }, false, new AbortController().signal);
     assert.equal(result.status, "success");
     if (result.status === "success") result.release();
 
-    const soon = await p.getBestOffer(autoRequest, base + 1_000);
+    const soon = await bestOffer(p, autoRequest, base + 1_000);
     assert.equal(soon?.modelId, "test/large");
 
-    const patient = await p.getBestOffer({ ...autoRequest, maxOptimizationWaitMs: 61_000 }, base + 1_000);
+    const patient = await bestOffer(p, { ...autoRequest, maxOptimizationWaitMs: 61_000 }, base + 1_000);
     assert.equal(patient?.modelId, "test/small");
   } finally {
     globalThis.fetch = originalFetch;
@@ -74,11 +83,11 @@ test("network failure puts the provider behind a cooldown", async () => {
   try {
     const p = provider();
     const now = Date.now();
-    const offer = (await p.getBestOffer(autoRequest, now))!;
+    const offer = (await bestOffer(p, autoRequest, now))!;
     const result = await p.execute(offer, { messages: [] }, false, new AbortController().signal);
     assert.equal(result.status, "retryable");
     if (result.status === "retryable") assert.equal(result.scope, "provider");
-    const next = await p.getBestOffer(autoRequest, now + 1);
+    const next = await bestOffer(p, autoRequest, now + 1);
     assert.ok(next);
     assert.ok((next?.availableAt ?? 0) >= now + 15_000);
   } finally {
@@ -95,7 +104,7 @@ test("authentication rejection is provider-scoped", async () => {
   globalThis.fetch = async () => new Response('{"error":"bad key"}', { status: 401 });
   try {
     const p = provider();
-    const offer = (await p.getBestOffer(autoRequest, Date.now()))!;
+    const offer = (await bestOffer(p, autoRequest, Date.now()))!;
     const result = await p.execute(offer, { messages: [] }, false, new AbortController().signal);
     assert.equal(result.status, "rejected");
     if (result.status === "rejected") assert.equal(result.scope, "provider");
@@ -139,18 +148,18 @@ test("overflow offer is available only after an opted-in daily quota is exhauste
       ],
     });
 
-    const initial = (await p.getBestOffer(autoRequest, Date.now()))!;
+    const initial = (await bestOffer(p, autoRequest, Date.now()))!;
     assert.equal(initial.kind, "standard");
     const result = await p.execute(initial, { messages: [] }, false, new AbortController().signal);
     assert.equal(result.status, "success");
     if (result.status === "success") result.release();
 
     const now = Date.now();
-    const standard = (await p.getBestOffer(autoRequest, now))!;
+    const standard = (await bestOffer(p, autoRequest, now))!;
     assert.equal(standard.kind, "standard");
     assert.ok(standard.availableAt > now + 60_000);
 
-    const overflow = (await p.getBestOffer(
+    const overflow = (await bestOffer(p, 
       { ...autoRequest, offerKind: "overflow" },
       now,
     ))!;
@@ -203,11 +212,11 @@ test("overflow 429 suppresses more overflow probes for that model", async () => 
       ],
     });
 
-    const first = (await p.getBestOffer(autoRequest, Date.now()))!;
+    const first = (await bestOffer(p, autoRequest, Date.now()))!;
     const firstResult = await p.execute(first, { messages: [] }, false, new AbortController().signal);
     if (firstResult.status === "success") firstResult.release();
 
-    const overflow = (await p.getBestOffer(
+    const overflow = (await bestOffer(p, 
       { ...autoRequest, offerKind: "overflow" },
       Date.now(),
     ))!;
@@ -223,7 +232,7 @@ test("overflow 429 suppresses more overflow probes for that model", async () => 
       assert.equal(overflowResult.reason, "overflow_limit_confirmed");
     }
 
-    const blocked = await p.getBestOffer(
+    const blocked = await bestOffer(p, 
       { ...autoRequest, offerKind: "overflow" },
       Date.now() + 60_000,
     );
@@ -269,7 +278,7 @@ test("overflow never bypasses hard single-request capacity", async () => {
       ],
     });
 
-    const offer = await p.getBestOffer(
+    const offer = await bestOffer(p, 
       { ...autoRequest, offerKind: "overflow", body: { ...autoRequest.body, testInputTokens: 200 } },
       Date.now(),
     );
@@ -320,16 +329,16 @@ test("overflow can continue with another exhausted model after one model confirm
       ],
     });
 
-    const first = (await p.getBestOffer(autoRequest, Date.now()))!;
+    const first = (await bestOffer(p, autoRequest, Date.now()))!;
     const firstResult = await p.execute(first, { messages: [] }, false, new AbortController().signal);
     if (firstResult.status === "success") firstResult.release();
 
-    const second = (await p.getBestOffer(autoRequest, Date.now()))!;
+    const second = (await bestOffer(p, autoRequest, Date.now()))!;
     assert.equal(second.modelId, "test/b");
     const secondResult = await p.execute(second, { messages: [] }, false, new AbortController().signal);
     if (secondResult.status === "success") secondResult.release();
 
-    const overflowA = (await p.getBestOffer(
+    const overflowA = (await bestOffer(p, 
       { ...autoRequest, offerKind: "overflow" },
       Date.now(),
     ))!;
@@ -342,7 +351,7 @@ test("overflow can continue with another exhausted model after one model confirm
     );
     assert.equal(failed.status, "retryable");
 
-    const overflowB = await p.getBestOffer(
+    const overflowB = await bestOffer(p, 
       { ...autoRequest, offerKind: "overflow" },
       Date.now() + 60_000,
     );
@@ -393,11 +402,11 @@ test("overflow upstream failure does not create a hard-cap observation", async (
       ],
     });
 
-    const first = (await p.getBestOffer(autoRequest, Date.now()))!;
+    const first = (await bestOffer(p, autoRequest, Date.now()))!;
     const firstResult = await p.execute(first, { messages: [] }, false, new AbortController().signal);
     if (firstResult.status === "success") firstResult.release();
 
-    const overflow = (await p.getBestOffer(
+    const overflow = (await bestOffer(p, 
       { ...autoRequest, offerKind: "overflow" },
       Date.now(),
     ))!;
@@ -440,7 +449,7 @@ test("async token counting bases immediate availability on the completed count",
     });
 
     const startedAt = Date.now();
-    const offer = await p.getBestOffer(autoRequest, startedAt);
+    const offer = await bestOffer(p, autoRequest, startedAt);
 
     assert.ok(offer);
     assert.ok((offer?.availableAt ?? 0) >= startedAt);
@@ -474,8 +483,8 @@ test("successful input token counts are cached per request and model", async () 
     const body = { messages: [] };
     const request = { ...autoRequest, body };
 
-    const first = await p.getBestOffer(request, Date.now());
-    const second = await p.getBestOffer(request, Date.now() + 1);
+    const first = await bestOffer(p, request, Date.now());
+    const second = await bestOffer(p, request, Date.now() + 1);
 
     assert.equal(first?.inputTokens, 50);
     assert.equal(second?.inputTokens, 50);
@@ -504,7 +513,7 @@ test("provider selection uses model-specific input token counts", async () => {
       ],
     });
 
-    const offer = await p.getBestOffer(autoRequest, Date.now());
+    const offer = await bestOffer(p, autoRequest, Date.now());
     assert.equal(offer?.modelId, "test/large");
     assert.equal(offer?.inputTokens, 50);
   } finally {
@@ -518,11 +527,63 @@ test("provider without overflow configuration never advertises overflow", async 
   process.env.TEST_PROVIDER_KEY = "test";
   try {
     const p = provider();
-    const offer = await p.getBestOffer(
+    const offer = await bestOffer(p, 
       { ...autoRequest, offerKind: "overflow" },
       Date.now(),
     );
     assert.equal(offer, null);
+  } finally {
+    if (originalKey === undefined) delete process.env.TEST_PROVIDER_KEY;
+    else process.env.TEST_PROVIDER_KEY = originalKey;
+  }
+});
+
+
+test("provider reports hard capacity without exposing token counting to the relay", async () => {
+  const originalKey = process.env.TEST_PROVIDER_KEY;
+  process.env.TEST_PROVIDER_KEY = "test";
+  try {
+    const p = provider();
+    const result = await p.getBestOffer({
+      ...autoRequest,
+      requestedModel: "test/small",
+      body: { ...autoRequest.body, testInputTokens: 101 },
+    }, Date.now());
+
+    assert.deepEqual(result, {
+      status: "no_offer",
+      providerId: "test",
+      reason: "request_exceeds_capacity",
+    });
+  } finally {
+    if (originalKey === undefined) delete process.env.TEST_PROVIDER_KEY;
+    else process.env.TEST_PROVIDER_KEY = originalKey;
+  }
+});
+
+test("provider reports authoritative token-count failures as no-offer results", async () => {
+  const originalKey = process.env.TEST_PROVIDER_KEY;
+  process.env.TEST_PROVIDER_KEY = "test";
+  try {
+    const p = new OpenAICompatibleProvider({
+      id: "test",
+      priority: 1,
+      credentialEnv: "TEST_PROVIDER_KEY",
+      baseUrl: "https://example.test/v1",
+      defaultRetryMs: 5_000,
+      providerFailureCooldownMs: 15_000,
+      countInputTokens: () => { throw new Error("tokenizer unavailable"); },
+      models: [
+        { id: "test/only", upstreamModel: "only", contextWindowTokens: 1_000, quota: policy(1_000) },
+      ],
+    });
+
+    const result = await p.getBestOffer(autoRequest, Date.now());
+    assert.equal(result.status, "no_offer");
+    if (result.status === "no_offer") {
+      assert.equal(result.reason, "token_count_failed");
+      assert.equal(result.detail, "tokenizer unavailable");
+    }
   } finally {
     if (originalKey === undefined) delete process.env.TEST_PROVIDER_KEY;
     else process.env.TEST_PROVIDER_KEY = originalKey;

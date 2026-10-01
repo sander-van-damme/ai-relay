@@ -7,6 +7,7 @@ import {
   type ProviderExecutionResult,
   type ProviderOffer,
   type ProviderOfferKind,
+  type ProviderOfferResult,
 } from "./providers/index.ts";
 import type { RelayConfig, RelayJob } from "./types.ts";
 
@@ -141,13 +142,13 @@ export class RelayScheduler {
     queueMicrotask(() => void this.drain());
   }
 
-  private async offers(
+  private async offerResults(
     job: RelayJob,
     now: number,
     maxWait: number,
     avoidLastFailure: boolean,
     offerKind: ProviderOfferKind,
-  ): Promise<ProviderOffer[]> {
+  ): Promise<ProviderOfferResult[]> {
     const requestedModel = isAutoModel(job.requestedModel) ? "auto" : job.requestedModel;
     const excludedModelIds = new Set(job.excludedModelIds);
     const lastFailure = avoidLastFailure ? job.lastRetryFailure : undefined;
@@ -157,27 +158,53 @@ export class RelayScheduler {
       .filter((provider) => !job.excludedProviderIds.has(provider.id))
       .filter((provider) => !(lastFailure?.scope === "provider" && lastFailure.providerId === provider.id));
 
-    const offers = await Promise.all(providers.map(async (provider) => {
+    return Promise.all(providers.map(async (provider): Promise<ProviderOfferResult> => {
       try {
-        return await provider.getBestOffer({
+        const result = await provider.getBestOffer({
           offerKind,
           body: job.body,
           requestedModel,
           maxOptimizationWaitMs: maxWait,
           excludedModelIds,
         }, now);
+        if (result.status === "no_offer" && result.reason === "token_count_failed") {
+          log("warn", "provider_offer_error", {
+            request_id: job.id,
+            provider: provider.id,
+            offer_kind: offerKind,
+            error: result.detail ?? "Authoritative input token count failed.",
+          });
+        }
+        return result;
       } catch (error) {
+        const detail = error instanceof Error ? error.message : String(error);
         log("warn", "provider_offer_error", {
           request_id: job.id,
           provider: provider.id,
           offer_kind: offerKind,
-          error: error instanceof Error ? error.message : String(error),
+          error: detail,
         });
-        return null;
+        return {
+          status: "no_offer",
+          providerId: provider.id,
+          reason: "offer_evaluation_failed",
+          detail,
+        };
       }
     }));
+  }
 
-    return offers.filter((offer): offer is ProviderOffer => offer !== null);
+  private async offers(
+    job: RelayJob,
+    now: number,
+    maxWait: number,
+    avoidLastFailure: boolean,
+    offerKind: ProviderOfferKind,
+  ): Promise<ProviderOffer[]> {
+    const results = await this.offerResults(job, now, maxWait, avoidLastFailure, offerKind);
+    return results
+      .filter((result): result is Extract<ProviderOfferResult, { status: "offer" }> => result.status === "offer")
+      .map((result) => result.offer);
   }
 
   private async choice(job: RelayJob, now: number): Promise<JobChoice | null> {
@@ -240,33 +267,52 @@ export class RelayScheduler {
       ? models.filter((model) => !job.excludedModelIds.has(model.id))
       : models.filter((model) => model.id === job.requestedModel && !job.excludedModelIds.has(model.id)))
       .filter((model) => !job.excludedProviderIds.has(model.providerId));
-    const anyConfigured = this.providers.some((provider) => provider.isConfigured());
-
-    const configuredEligible = eligible.filter((model) => this.providerById.get(model.providerId)?.isConfigured());
-    const capacityChecks = await Promise.all(configuredEligible.map(async (model): Promise<boolean | null> => {
-      const provider = this.providerById.get(model.providerId);
-      if (!provider) return null;
-      try {
-        const inputTokens = await provider.countInputTokens(job.body, model.id);
-        return inputTokens <= model.inputCapacityTokens;
-      } catch {
-        return null;
-      }
-    }));
-    const allCapacityChecksKnown = capacityChecks.length > 0 && capacityChecks.every((result) => result !== null);
-    const capacityExists = capacityChecks.some((result) => result === true);
 
     let code = "model_unavailable";
     let message = "No provider can currently handle this request.";
-    if (!anyConfigured) {
-      code = "provider_not_configured";
-      message = "No configured provider API key is available.";
-    } else if (allCapacityChecksKnown && !capacityExists) {
-      code = "request_exceeds_provider_capacity";
-      message = "Exact input token counts exceed every eligible model's effective request capacity.";
-    } else if (eligible.length === 0 && (job.excludedModelIds.size > 0 || job.excludedProviderIds.size > 0)) {
+
+    if (eligible.length === 0 && (job.excludedModelIds.size > 0 || job.excludedProviderIds.size > 0)) {
       code = "upstream_unavailable";
       message = "Every eligible provider/model path is unavailable, rejected, or exhausted for this request.";
+    } else {
+      const relevantProviderIds = new Set(eligible.map((model) => model.providerId));
+      const relevantProviders = this.providers.filter((provider) => relevantProviderIds.has(provider.id));
+      const requestedModel = isAutoModel(job.requestedModel) ? "auto" : job.requestedModel;
+
+      const diagnostics = await Promise.all(relevantProviders.map(async (provider): Promise<ProviderOfferResult> => {
+        try {
+          return await provider.getBestOffer({
+            offerKind: "standard",
+            body: job.body,
+            requestedModel,
+            maxOptimizationWaitMs: 0,
+            excludedModelIds: new Set(job.excludedModelIds),
+          }, Date.now());
+        } catch (error) {
+          return {
+            status: "no_offer",
+            providerId: provider.id,
+            reason: "offer_evaluation_failed",
+            detail: error instanceof Error ? error.message : String(error),
+          };
+        }
+      }));
+
+      const configuredDiagnostics = diagnostics.filter(
+        (result) => !(result.status === "no_offer" && result.reason === "provider_not_configured"),
+      );
+      if (relevantProviders.length > 0 && configuredDiagnostics.length === 0) {
+        code = "provider_not_configured";
+        message = "No configured provider API key is available for an eligible model.";
+      } else if (
+        configuredDiagnostics.length > 0
+        && configuredDiagnostics.every(
+          (result) => result.status === "no_offer" && result.reason === "request_exceeds_capacity",
+        )
+      ) {
+        code = "request_exceeds_provider_capacity";
+        message = "Provider-specific input token counts exceed every configured eligible model's effective request capacity.";
+      }
     }
 
     const error = openAiError(code, message);

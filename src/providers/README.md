@@ -27,18 +27,15 @@ A request that can never fit must not produce an offer.
 
 ## Input token counting
 
-Input token counting is provider-owned and model-specific.
+Input token counting is provider-owned and model-specific. It is an implementation detail of offer evaluation, not a capability exposed through the `Provider` interface.
 
-The relay must not apply a provider-independent token estimate. Before advertising an offer, a provider must determine the input token count for the concrete model through `countInputTokens()`. It may use a local model tokenizer, an official SDK, or an authoritative provider counting endpoint.
+The relay must not apply a provider-independent token estimate or ask a provider to count a model directly. Before advertising an offer, a provider must determine the input token count for each concrete model it evaluates. It may use a local model tokenizer, an official SDK, or an authoritative provider counting endpoint.
 
-`countInputTokens()` is asynchronous because some providers can only determine the authoritative count through I/O. Providers with local tokenizers may still return the result immediately through the same async interface.
-
-The count must reflect the actual request representation seen by that model, including provider-specific chat formatting, system/developer instructions, tool definitions and other input that consumes the model's context. If a provider cannot determine an authoritative count for a request, it must not fall back to a generic bytes/characters heuristic.
+Counting may be asynchronous because some providers can only determine the authoritative count through I/O. The count must reflect the actual request representation seen by that model, including provider-specific chat formatting, system/developer instructions, tool definitions and other input that consumes the model's context. If a provider cannot determine an authoritative count for a request, it must not fall back to a generic bytes/characters heuristic.
 
 `ProviderOffer.inputTokens` is the authoritative count used for that offer. Execution and quota accounting must reuse that exact value rather than tokenizing the request again.
 
 Providers may cache token counts per request/model so repeated standard/overflow evaluation does not repeat expensive tokenization or network calls. A failed count must not be cached permanently when a later retry could succeed.
-
 
 ## Offer selection
 
@@ -55,6 +52,8 @@ Providers may cache token counts per request/model so repeated standard/overflow
 - whether the provider is configured.
 
 If a request can be handled later, `availableAt` must describe the earliest realistic start time. Cross-provider comparison belongs only to the relay scheduler.
+
+`getBestOffer()` returns a structured `ProviderOfferResult`. A successful result contains the concrete offer. A no-offer result explains why the provider could not make one, such as missing configuration, no eligible model, hard request capacity, or authoritative token-count failure. The relay may use those reasons for terminal error classification, but it must not reproduce the provider's feasibility checks itself.
 
 ## Standard and overflow offers
 
@@ -143,6 +142,8 @@ A provider is incomplete until tests cover at least:
 15. Token counting is model-specific and no provider-independent estimate is used.
 16. The exact token count on the selected offer is reused for quota accounting and execution.
 17. Repeated offer evaluation reuses a cached successful token count when appropriate.
+18. Token counting is not exposed through the public `Provider` interface.
+19. No-offer results distinguish hard capacity from configuration, eligibility and counting failures.
 
 ## Adding a provider
 

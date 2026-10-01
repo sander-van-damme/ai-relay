@@ -12,7 +12,9 @@ export type {
   ProviderExecutionResult,
   ProviderFailureScope,
   ProviderModelInfo,
+  ProviderNoOfferReason,
   ProviderOffer,
   ProviderOfferKind,
+  ProviderOfferResult,
   ProviderStatus,
 } from "./shared/types.ts";

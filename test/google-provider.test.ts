@@ -32,6 +32,15 @@ const standardRequest = {
   excludedModelIds: new Set<string>(),
 };
 
+async function bestOffer(
+  provider: GoogleProvider,
+  request: Parameters<GoogleProvider["getBestOffer"]>[0],
+  now?: number,
+) {
+  const result = await provider.getBestOffer(request, now);
+  return result.status === "offer" ? result.offer : null;
+}
+
 function fakeClient(create: (request: unknown) => unknown | Promise<unknown>): GoogleGenAI {
   return {
     models: {
@@ -145,7 +154,7 @@ test("Google execution uses the official Interactions API and reuses stored cont
   try {
     const provider = new GoogleProvider(() => client, [TEST_MODEL]);
     const firstBody = { messages: [{ role: "user", content: "Hello" }] };
-    const firstOffer = (await provider.getBestOffer({ ...standardRequest, body: firstBody }, Date.now()))!;
+    const firstOffer = (await bestOffer(provider, { ...standardRequest, body: firstBody }, Date.now()))!;
     const firstResult = await provider.execute(firstOffer, firstBody, false, new AbortController().signal);
     assert.equal(firstResult.status, "success");
     if (firstResult.status !== "success") return;
@@ -160,7 +169,7 @@ test("Google execution uses the official Interactions API and reuses stored cont
         { role: "user", content: "And again?" },
       ],
     };
-    const secondOffer = (await provider.getBestOffer({ ...standardRequest, body: secondBody }, Date.now()))!;
+    const secondOffer = (await bestOffer(provider, { ...standardRequest, body: secondBody }, Date.now()))!;
     const secondResult = await provider.execute(secondOffer, secondBody, false, new AbortController().signal);
     assert.equal(secondResult.status, "success");
     if (secondResult.status === "success") secondResult.release();
@@ -209,7 +218,7 @@ test("Robotics uses native generateContent and preserves Google content for cont
   try {
     const provider = new GoogleProvider(() => client, [robotics]);
     const firstBody = { messages: [{ role: "user", content: "Move once" }] };
-    const firstOffer = (await provider.getBestOffer({
+    const firstOffer = (await bestOffer(provider, {
       ...standardRequest,
       body: firstBody,
       requestedModel: robotics.id,
@@ -229,7 +238,7 @@ test("Robotics uses native generateContent and preserves Google content for cont
         { role: "user", content: "Move again" },
       ],
     };
-    const secondOffer = (await provider.getBestOffer({
+    const secondOffer = (await bestOffer(provider, {
       ...standardRequest,
       body: secondBody,
       requestedModel: robotics.id,
@@ -279,7 +288,7 @@ test("Robotics streaming is translated through native generateContentStream", as
       messages: [{ role: "user", content: "Move" }],
       stream_options: { include_usage: true },
     };
-    const offer = (await provider.getBestOffer({
+    const offer = (await bestOffer(provider, {
       ...standardRequest,
       body,
       requestedModel: robotics.id,
@@ -314,14 +323,14 @@ test("Google offer filtering respects model-specific thinking levels", async () 
       reasoning_effort: "minimal",
     };
 
-    const unsupported = await provider.getBestOffer({
+    const unsupported = await bestOffer(provider, {
       ...standardRequest,
       body,
       requestedModel: "google/gemini-3.8-flash",
     }, Date.now());
     assert.equal(unsupported, null);
 
-    const supported = await provider.getBestOffer({
+    const supported = await bestOffer(provider, {
       ...standardRequest,
       body,
       requestedModel: "google/gemini-3.6-flash",
@@ -360,7 +369,7 @@ test("Google streaming is translated to OpenAI SSE chunks", async () => {
       messages: [{ role: "user", content: "Hello" }],
       stream_options: { include_usage: true },
     };
-    const offer = (await provider.getBestOffer({ ...standardRequest, body }, Date.now()))!;
+    const offer = (await bestOffer(provider, { ...standardRequest, body }, Date.now()))!;
     const result = await provider.execute(offer, body, true, new AbortController().signal);
     assert.equal(result.status, "success");
     if (result.status !== "success") return;
@@ -394,16 +403,16 @@ test("Google overflow only bypasses RPD and a 429 blocks that model for exactly 
 
   try {
     const provider = new GoogleProvider(() => client, [TEST_MODEL]);
-    const firstOffer = (await provider.getBestOffer(standardRequest, Date.now()))!;
+    const firstOffer = (await bestOffer(provider, standardRequest, Date.now()))!;
     const firstResult = await provider.execute(firstOffer, standardRequest.body, false, new AbortController().signal);
     assert.equal(firstResult.status, "success");
     if (firstResult.status === "success") firstResult.release();
 
     const now = Date.now();
-    const standard = (await provider.getBestOffer(standardRequest, now))!;
+    const standard = (await bestOffer(provider, standardRequest, now))!;
     assert.ok(standard.availableAt > now + 60_000);
 
-    const overflow = (await provider.getBestOffer({ ...standardRequest, offerKind: "overflow" }, now))!;
+    const overflow = (await bestOffer(provider, { ...standardRequest, offerKind: "overflow" }, now))!;
     assert.equal(overflow.kind, "overflow");
     assert.ok(overflow.availableAt <= Date.now());
 
@@ -448,11 +457,11 @@ test("non-quota Google failures do not create an overflow hard-cap observation",
 
   try {
     const provider = new GoogleProvider(() => client, [TEST_MODEL]);
-    const firstOffer = (await provider.getBestOffer(standardRequest, Date.now()))!;
+    const firstOffer = (await bestOffer(provider, standardRequest, Date.now()))!;
     const firstResult = await provider.execute(firstOffer, standardRequest.body, false, new AbortController().signal);
     if (firstResult.status === "success") firstResult.release();
 
-    const overflow = (await provider.getBestOffer(
+    const overflow = (await bestOffer(provider, 
       { ...standardRequest, offerKind: "overflow" },
       Date.now(),
     ))!;
@@ -460,6 +469,30 @@ test("non-quota Google failures do not create an overflow hard-cap observation",
     assert.equal(failed.status, "retryable");
     if (failed.status === "retryable") assert.equal(failed.scope, "provider");
     assert.equal(provider.status().models[0]?.overflowBlockedUntil, null);
+  } finally {
+    if (originalKey === undefined) delete process.env.GEMINI_API_KEY;
+    else process.env.GEMINI_API_KEY = originalKey;
+  }
+});
+
+test("Google returns structured no-offer reasons for unsupported model requests", async () => {
+  const originalKey = process.env.GEMINI_API_KEY;
+  process.env.GEMINI_API_KEY = "test";
+  try {
+    const provider = new GoogleProvider(
+      () => fakeClient(() => completedInteraction("unused")),
+      [TEST_MODEL],
+    );
+    const result = await provider.getBestOffer({
+      ...standardRequest,
+      requestedModel: "google/not-owned",
+    }, Date.now());
+
+    assert.deepEqual(result, {
+      status: "no_offer",
+      providerId: "google",
+      reason: "no_eligible_model",
+    });
   } finally {
     if (originalKey === undefined) delete process.env.GEMINI_API_KEY;
     else process.env.GEMINI_API_KEY = originalKey;
