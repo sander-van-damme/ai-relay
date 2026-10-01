@@ -16,7 +16,7 @@ Install dependencies, add your provider keys, and install the service:
 ```bash
 npm install
 cp .env.example .env
-# Edit .env and set GEMINI_API_KEY and/or NVIDIA_API_KEY.
+# Edit .env and set GEMINI_API_KEY. NVIDIA_API_KEY is reserved for the unfinished NVIDIA provider.
 sudo npm run install-service
 ```
 
@@ -58,7 +58,7 @@ The scheduler asks for `standard` offers first. Providers may optionally expose 
 
 Effective single-request capacity is the smaller of the model context limit and its configured TPM limit. This prevents a request from being routed to a model whose context is large enough but whose per-minute quota can never admit that request.
 
-Within a provider, the smallest-capacity model that can handle the request is preferred, provided it becomes available inside the current optimization wait. Across providers the same rule is applied. Provider priority is only a tie-breaker; Google currently has priority over NVIDIA for otherwise equivalent offers.
+Within a provider, the smallest-capacity model that can handle the request is preferred, provided it becomes available inside the current optimization wait. Across providers the same rule is applied. Provider priority is only a tie-breaker for otherwise equivalent offers.
 
 The initial optimization wait is 15 seconds. Every failed execution halves it:
 
@@ -85,6 +85,12 @@ The checked-in catalog mirrors the non-zero AI Studio quotas supplied for this r
 Google quota accounting uses the AI Studio RPM, TPM and RPD limits. RPD resets at midnight in `America/Los_Angeles`. Speculative overflow is enabled only for RPD because the observed project usage can exceed that displayed daily limit. RPM, TPM, context capacity and provider/model health remain hard constraints. If an overflow attempt receives a Google `429` that explicitly identifies the daily/RPD quota, overflow for that model is suppressed for exactly 24 hours. Generic `429` responses, unrelated network errors, and `5xx` responses do not create that observation.
 
 Interactions are stored so follow-up requests can use `previous_interaction_id`, preserving Google-native multi-turn/tool state. Continuation state is bounded to one hour and reused only on the same upstream model.
+
+## NVIDIA provider
+
+The NVIDIA implementation is retained as unfinished scaffolding but is intentionally disabled. Its `getBestOffer()` currently always returns a structured `no_offer` result with reason `no_eligible_model`, so the scheduler cannot select NVIDIA even when `NVIDIA_API_KEY` is configured.
+
+Before enabling it, the NVIDIA provider still needs to follow the full contract in `src/providers/README.md`: evaluate the official SDK/native APIs versus the OpenAI-compatible endpoint, expand and verify the model catalog and capabilities, implement verified request/token/daily/concurrency limits, validate authoritative token counting and capacities, implement NVIDIA-specific failure/cooldown/overflow behavior, and add the required provider tests.
 
 ## API
 
@@ -133,6 +139,8 @@ Provider credentials:
 GEMINI_API_KEY
 NVIDIA_API_KEY
 ```
+
+`NVIDIA_API_KEY` is currently unused for routing because the NVIDIA provider is intentionally disabled pending completion.
 
 For local development, `npm start` reads `.env` when present. The systemd service reads `/etc/ai-relay.env`.
 
