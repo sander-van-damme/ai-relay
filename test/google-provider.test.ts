@@ -387,6 +387,94 @@ test("Antigravity uses the agent API with Search and caller-provided functions o
   }
 });
 
+test("Antigravity keeps native tool-call continuations stateful", async () => {
+  const originalKey = process.env.GEMINI_API_KEY;
+  process.env.GEMINI_API_KEY = "test";
+  const antigravity = GOOGLE_MODELS.find((model) => model.id === "google/antigravity-preview-09-2026")!;
+  const requests: Array<Record<string, unknown>> = [];
+  let call = 0;
+
+  try {
+    const provider = new GoogleProvider(
+      () => fakeClient((request) => {
+        requests.push(request as Record<string, unknown>);
+        call += 1;
+        if (call === 1) {
+          return {
+            id: "native-agent-call",
+            status: "requires_action",
+            created: "2026-10-01T08:00:00Z",
+            steps: [{
+              type: "function_call",
+              id: "call_native",
+              name: "read_file",
+              arguments: { path: "a.ts" },
+            }],
+            usage: { total_input_tokens: 10, total_output_tokens: 2, total_tokens: 12 },
+          };
+        }
+        return completedInteraction("native-agent-result", "Done");
+      }),
+      [antigravity],
+      async () => 20,
+    );
+
+    const tools = [{
+      type: "function",
+      function: {
+        name: "read_file",
+        parameters: { type: "object", properties: { path: { type: "string" } } },
+      },
+    }];
+    const firstBody = {
+      messages: [{ role: "user", content: "Inspect a.ts" }],
+      tools,
+      tool_choice: "auto",
+    };
+    const firstOffer = (await bestOffer(provider, {
+      ...standardRequest,
+      body: firstBody,
+      requestedModel: antigravity.id,
+    }, Date.now()))!;
+    const firstResult = await provider.execute(firstOffer, firstBody, false, new AbortController().signal);
+    assert.equal(firstResult.status, "success");
+    if (firstResult.status !== "success") return;
+    const firstPayload = await firstResult.response.json() as Record<string, unknown>;
+    firstResult.release();
+
+    const firstChoice = (firstPayload.choices as Array<Record<string, unknown>>)[0]!;
+    const assistant = firstChoice.message as Record<string, unknown>;
+    const secondBody = {
+      messages: [
+        ...firstBody.messages,
+        assistant,
+        { role: "tool", tool_call_id: "call_native", content: "file contents" },
+      ],
+      tools,
+      tool_choice: "auto",
+    };
+    const secondOffer = (await bestOffer(provider, {
+      ...standardRequest,
+      body: secondBody,
+      requestedModel: antigravity.id,
+    }, Date.now()))!;
+    const secondResult = await provider.execute(secondOffer, secondBody, false, new AbortController().signal);
+    assert.equal(secondResult.status, "success");
+    if (secondResult.status === "success") secondResult.release();
+
+    assert.equal(requests[1]?.previous_interaction_id, "native-agent-call");
+    assert.deepEqual(requests[1]?.input, [{
+      type: "function_result",
+      name: "read_file",
+      call_id: "call_native",
+      result: [{ type: "text", text: "file contents" }],
+    }]);
+  } finally {
+    if (originalKey === undefined) delete process.env.GEMINI_API_KEY;
+    else process.env.GEMINI_API_KEY = originalKey;
+  }
+});
+
 test("Antigravity bootstraps external tool history as text, then resumes statefully", async () => {
   const originalKey = process.env.GEMINI_API_KEY;
   process.env.GEMINI_API_KEY = "test";
