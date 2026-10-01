@@ -97,9 +97,10 @@ test("Antigravity bootstrap flattens historical tool traces into plain text", ()
     }],
   });
 
-  assert.deepEqual(body.messages?.slice(0, 1), [{ role: "system", content: "Work carefully." }]);
-  assert.equal(body.messages?.length, 2);
-  const bootstrap = body.messages?.[1] as Record<string, unknown>;
+  const messages = body.messages as Array<Record<string, unknown>>;
+  assert.deepEqual(messages.slice(0, 1), [{ role: "system", content: "Work carefully." }]);
+  assert.equal(messages.length, 2);
+  const bootstrap = messages[1]!;
   assert.equal(bootstrap.role, "user");
   assert.match(String(bootstrap.content), /historical conversation context/i);
   assert.match(String(bootstrap.content), /ASSISTANT TOOL CALL \[call_1\] read_file/);
