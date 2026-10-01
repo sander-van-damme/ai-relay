@@ -148,7 +148,9 @@ function antigravityTranscript(body: ChatCompletionRequest): string {
           if (!call || call.type !== "function" || typeof call.id !== "string" || !fn || typeof fn.name !== "string") {
             throw new Error("Only OpenAI function tool calls with ids are supported by the Google relay provider.");
           }
-          const args = typeof fn.arguments === "string" ? fn.arguments : JSON.stringify(fn.arguments ?? {});
+          const args = typeof fn.arguments === "string"
+            ? fn.arguments
+            : (JSON.stringify(fn.arguments ?? {}) ?? "{}");
           lines.push(`ASSISTANT TOOL CALL [${call.id}] ${fn.name}:`, args, "");
         }
       } else if (!text) {
@@ -535,7 +537,7 @@ function replaySafeExternalToolContents(contents: Content[]): Content[] {
         thoughtSignature: GOOGLE_EXTERNAL_TOOL_THOUGHT_SIGNATURE,
       } as Part;
     });
-    return { ...content, parts };
+    return { ...content, parts } as Content;
   });
 }
 
