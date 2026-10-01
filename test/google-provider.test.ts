@@ -12,6 +12,7 @@ const TEST_MODEL: GoogleModel = {
   id: "google/test-model",
   upstreamModel: "test-model",
   contextWindowTokens: 1_000,
+  preference: 100,
   quota: {
     maxConcurrent: null,
     dailyWindow: { type: "rolling" },
@@ -41,10 +42,16 @@ async function bestOffer(
   return result.status === "offer" ? result.offer : null;
 }
 
-function fakeClient(create: (request: unknown) => unknown | Promise<unknown>): GoogleGenAI {
+function fakeClient(
+  create: (request: unknown) => unknown | Promise<unknown>,
+  count?: (request: unknown) => void,
+): GoogleGenAI {
   return {
     models: {
-      countTokens: async () => ({ totalTokens: 10 }),
+      countTokens: async (request: unknown) => {
+        count?.(request);
+        return { totalTokens: 10 };
+      },
       generateContent: async (request: unknown) => create(request),
       generateContentStream: async (request: unknown) => create(request),
     },
@@ -70,21 +77,31 @@ function completedInteraction(id: string, text = "Hello back") {
   };
 }
 
-test("Google catalog contains every non-zero text-output model from the AI Studio limits", () => {
+test("Google catalog contains every eligible route from the AI Studio limits", () => {
   assert.deepEqual(GOOGLE_MODELS.map((model) => model.id), [
-    "google/gemma-4-26b-a4b-it",
-    "google/gemma-4-31b-it",
-    "google/gemini-robotics-er-2-preview",
-    "google/gemini-3.5-flash-lite",
-    "google/gemini-3.1-flash-lite",
-    "google/gemini-2.5-flash-lite",
     "google/gemini-3.8-flash",
+    "google/antigravity-preview-09-2026",
     "google/gemini-3.7-flash",
     "google/gemini-3.6-flash",
     "google/gemini-3.5-flash",
+    "google/gemini-3.5-flash-lite",
+    "google/gemini-3.1-flash-lite",
     "google/gemini-3-flash-preview",
+    "google/gemini-robotics-er-2-preview",
     "google/gemini-2.5-flash",
+    "google/gemini-2.5-flash-lite",
+    "google/gemma-4-31b-it",
+    "google/gemma-4-26b-a4b-it",
   ]);
+
+  const antigravity = GOOGLE_MODELS.find((model) => model.id === "google/antigravity-preview-09-2026")!;
+  assert.equal(antigravity.upstreamAgent, "antigravity-preview-09-2026");
+  assert.equal(antigravity.upstreamModel, "gemini-3.8-flash");
+  assert.equal(antigravity.contextWindowTokens, 1_048_576);
+  assert.equal(antigravity.quota.limits.requestsPerMinute, 60);
+  assert.equal(antigravity.quota.limits.inputTokensPerMinute, 100_000);
+  assert.equal(antigravity.quota.limits.requestsPerDay, 100);
+  assert.equal(antigravity.preference, 1_200);
 
   const robotics = GOOGLE_MODELS.find((model) => model.id === "google/gemini-robotics-er-2-preview")!;
   assert.equal(robotics.contextWindowTokens, 131_072);
@@ -99,11 +116,13 @@ test("Google catalog contains every non-zero text-output model from the AI Studi
   assert.equal(flashLite.quota.limits.inputTokensPerMinute, 250_000);
   assert.equal(flashLite.quota.limits.requestsPerDay, 500);
 
-  const gemma = GOOGLE_MODELS.find((model) => model.id === "google/gemma-4-26b-a4b-it")!;
-  assert.equal(gemma.contextWindowTokens, 262_144);
-  assert.equal(gemma.quota.limits.requestsPerMinute, 30);
-  assert.equal(gemma.quota.limits.inputTokensPerMinute, 16_000);
-  assert.equal(gemma.quota.limits.requestsPerDay, 14_400);
+  const gemma31 = GOOGLE_MODELS.find((model) => model.id === "google/gemma-4-31b-it")!;
+  const gemma26 = GOOGLE_MODELS.find((model) => model.id === "google/gemma-4-26b-a4b-it")!;
+  assert.equal(gemma31.contextWindowTokens, 262_144);
+  assert.equal(gemma31.quota.limits.requestsPerMinute, 30);
+  assert.equal(gemma31.quota.limits.inputTokensPerMinute, 16_000);
+  assert.equal(gemma31.quota.limits.requestsPerDay, 14_400);
+  assert.ok(gemma31.preference > gemma26.preference);
 });
 
 test("Google interaction response is translated to OpenAI chat-completion shape", () => {
@@ -182,6 +201,206 @@ test("Google execution uses the official Interactions API and reuses stored cont
     assert.deepEqual(secondRequest.input, [
       { type: "user_input", content: [{ type: "text", text: "And again?" }] },
     ]);
+  } finally {
+    if (originalKey === undefined) delete process.env.GEMINI_API_KEY;
+    else process.env.GEMINI_API_KEY = originalKey;
+  }
+});
+
+test("Antigravity uses the agent API with Search and caller-provided functions only", async () => {
+  const originalKey = process.env.GEMINI_API_KEY;
+  process.env.GEMINI_API_KEY = "test";
+  const antigravity = GOOGLE_MODELS.find((model) => model.id === "google/antigravity-preview-09-2026")!;
+  const requests: Array<Record<string, unknown>> = [];
+  const countRequests: Array<Record<string, unknown>> = [];
+  let call = 0;
+  const client = fakeClient((request) => {
+    requests.push(request as Record<string, unknown>);
+    call += 1;
+    return completedInteraction(`agent-${call}`, call === 1 ? "First answer" : "Second answer");
+  }, (request) => countRequests.push(request as Record<string, unknown>));
+
+  try {
+    const provider = new GoogleProvider(() => client, [antigravity]);
+    const tools = [{
+      type: "function",
+      function: {
+        name: "read_file",
+        description: "Read a file from the caller's workspace",
+        parameters: {
+          type: "object",
+          properties: { path: { type: "string" } },
+          required: ["path"],
+        },
+      },
+    }];
+    const firstBody = {
+      messages: [
+        { role: "system", content: "Follow the task carefully." },
+        { role: "user", content: "Inspect the project." },
+      ],
+      tools,
+      tool_choice: "auto",
+      max_completion_tokens: 32_000,
+    };
+    const firstOffer = (await bestOffer(provider, {
+      ...standardRequest,
+      body: firstBody,
+      requestedModel: antigravity.id,
+    }, Date.now()))!;
+    const firstResult = await provider.execute(firstOffer, firstBody, false, new AbortController().signal);
+    assert.equal(firstResult.status, "success");
+    if (firstResult.status !== "success") return;
+    firstResult.release();
+
+    assert.equal(countRequests[0]?.model, "gemini-3.8-flash");
+    const countConfig = countRequests[0]?.config as Record<string, unknown>;
+    assert.match(JSON.stringify(countConfig.systemInstruction), /reasoning backend for an OpenAI-compatible chat-completions interface/);
+
+    const firstRequest = requests[0]!;
+    assert.equal(firstRequest.agent, "antigravity-preview-09-2026");
+    assert.equal(firstRequest.model, undefined);
+    assert.equal(firstRequest.environment, undefined);
+    assert.deepEqual(firstRequest.agent_config, {
+      type: "antigravity",
+      model: "gemini-3.8-flash",
+      max_total_tokens: "32000",
+    });
+    assert.match(String(firstRequest.system_instruction), /reasoning backend for an OpenAI-compatible chat-completions interface/);
+    assert.match(String(firstRequest.system_instruction), /Follow the task carefully/);
+    assert.deepEqual(firstRequest.tools, [
+      { type: "google_search" },
+      {
+        type: "function",
+        name: "read_file",
+        description: "Read a file from the caller's workspace",
+        parameters: {
+          type: "object",
+          properties: { path: { type: "string" } },
+          required: ["path"],
+        },
+      },
+    ]);
+    assert.doesNotMatch(JSON.stringify(firstRequest), /code_execution|url_context/);
+
+    const secondBody = {
+      messages: [
+        { role: "system", content: "Follow the task carefully." },
+        { role: "user", content: "Inspect the project." },
+        { role: "assistant", content: "First answer" },
+        { role: "user", content: "Continue." },
+      ],
+      tools,
+      tool_choice: "auto",
+      max_completion_tokens: 32_000,
+    };
+    const secondOffer = (await bestOffer(provider, {
+      ...standardRequest,
+      body: secondBody,
+      requestedModel: antigravity.id,
+    }, Date.now()))!;
+    const secondResult = await provider.execute(secondOffer, secondBody, false, new AbortController().signal);
+    assert.equal(secondResult.status, "success");
+    if (secondResult.status === "success") secondResult.release();
+
+    assert.equal(requests[1]?.previous_interaction_id, "agent-1");
+    assert.deepEqual(requests[1]?.input, [
+      { type: "user_input", content: [{ type: "text", text: "Continue." }] },
+    ]);
+  } finally {
+    if (originalKey === undefined) delete process.env.GEMINI_API_KEY;
+    else process.env.GEMINI_API_KEY = originalKey;
+  }
+});
+
+test("Antigravity still overrides default tools when the caller provides no functions", async () => {
+  const originalKey = process.env.GEMINI_API_KEY;
+  process.env.GEMINI_API_KEY = "test";
+  const antigravity = GOOGLE_MODELS.find((model) => model.id === "google/antigravity-preview-09-2026")!;
+  const requests: Array<Record<string, unknown>> = [];
+
+  try {
+    const provider = new GoogleProvider(
+      () => fakeClient((request) => {
+        requests.push(request as Record<string, unknown>);
+        return completedInteraction("agent-no-tools");
+      }),
+      [antigravity],
+    );
+    const body = { messages: [{ role: "user", content: "Hello" }] };
+    const offer = (await bestOffer(provider, {
+      ...standardRequest,
+      body,
+      requestedModel: antigravity.id,
+    }, Date.now()))!;
+    const result = await provider.execute(offer, body, false, new AbortController().signal);
+    assert.equal(result.status, "success");
+    if (result.status === "success") result.release();
+
+    assert.deepEqual(requests[0]?.tools, [{ type: "google_search" }]);
+    assert.equal(requests[0]?.environment, undefined);
+  } finally {
+    if (originalKey === undefined) delete process.env.GEMINI_API_KEY;
+    else process.env.GEMINI_API_KEY = originalKey;
+  }
+});
+
+test("Google preference breaks only otherwise-equivalent routing ties", async () => {
+  const originalKey = process.env.GEMINI_API_KEY;
+  process.env.GEMINI_API_KEY = "test";
+
+  const sharedQuota = {
+    maxConcurrent: null,
+    dailyWindow: { type: "rolling" as const },
+    limits: {
+      requestsPerMinute: 100,
+      inputTokensPerMinute: 1_000,
+      requestsPerDay: 1_000,
+      minimumSpacingMs: 0,
+    },
+  };
+  const lowPreference: GoogleModel = {
+    id: "google/low-preference",
+    upstreamModel: "low-preference",
+    contextWindowTokens: 1_000,
+    quota: sharedQuota,
+    preference: 100,
+  };
+  const highPreference: GoogleModel = {
+    id: "google/high-preference",
+    upstreamModel: "high-preference",
+    contextWindowTokens: 1_000,
+    quota: sharedQuota,
+    preference: 300,
+  };
+  const smallerCapacity: GoogleModel = {
+    id: "google/smaller-capacity",
+    upstreamModel: "smaller-capacity",
+    contextWindowTokens: 500,
+    quota: sharedQuota,
+    preference: 1,
+  };
+
+  try {
+    const provider = new GoogleProvider(
+      () => fakeClient(() => completedInteraction("unused")),
+      [lowPreference, highPreference],
+    );
+    const tied = await bestOffer(provider, {
+      ...standardRequest,
+      requestedModel: "auto",
+    }, 1_000);
+    assert.equal(tied?.modelId, highPreference.id);
+
+    const capacityProvider = new GoogleProvider(
+      () => fakeClient(() => completedInteraction("unused")),
+      [highPreference, smallerCapacity],
+    );
+    const capacityFirst = await bestOffer(capacityProvider, {
+      ...standardRequest,
+      requestedModel: "auto",
+    }, 1_000);
+    assert.equal(capacityFirst?.modelId, smallerCapacity.id);
   } finally {
     if (originalKey === undefined) delete process.env.GEMINI_API_KEY;
     else process.env.GEMINI_API_KEY = originalKey;
