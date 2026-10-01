@@ -1053,7 +1053,7 @@ export class GoogleProvider implements Provider {
               assistant,
               { role: "model", parts: modelParts as any[] },
               requestContents,
-              upstreamModel,
+              upstreamTarget,
             );
           }
 
@@ -1138,6 +1138,11 @@ export class GoogleProvider implements Provider {
     }
     if (code === 401 || code === 403) {
       this.providerState.blockedUntil = Math.max(this.providerState.blockedUntil, failedAt + 60_000);
+      log("warn", "provider_cooldown", {
+        provider: this.id,
+        reason: `upstream_${code}`,
+        blocked_until: new Date(this.providerState.blockedUntil).toISOString(),
+      });
       return { status: "rejected", scope: "provider", httpStatus: code, bodyText };
     }
     if (code !== undefined) {
