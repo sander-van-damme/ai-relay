@@ -25,6 +25,9 @@ import type {
   ProviderStatus,
 } from "../shared/types.ts";
 import {
+  hasAssistantToolCallsFrom,
+  hasGoogleToolHistory,
+  toAntigravityBootstrapBody,
   toGoogleCountInput,
   toGoogleDeveloperCountTokensRequest,
   toGoogleGenerateContentRequest,
@@ -110,8 +113,7 @@ export const GOOGLE_MODELS: readonly GoogleModel[] = [
   { id: "google/gemini-3.1-flash-lite", upstreamModel: "gemini-3.1-flash-lite", contextWindowTokens: 1_048_576, quota: quota(15, 250_000, 500), preference: 700, transport: "interactions", thinkingLevels: ALL_THINKING },
   { id: "google/gemini-3-flash-preview", upstreamModel: "gemini-3-flash-preview", contextWindowTokens: 1_048_576, quota: quota(5, 250_000, 20), preference: 600, transport: "interactions", thinkingLevels: ALL_THINKING },
   { id: "google/gemini-robotics-er-2-preview", upstreamModel: "gemini-robotics-er-2-preview", contextWindowTokens: 131_072, quota: quota(5, 250_000, 20), preference: 500, transport: "interactions", thinkingLevels: ALL_THINKING },
-  // gemini-2.5-flash returned a Developer API 404 ("no longer available to new users") on 2026-10-01.
-  { id: "google/gemini-2.5-flash-lite", upstreamModel: "gemini-2.5-flash-lite", contextWindowTokens: 1_048_576, quota: quota(10, 250_000, 20), preference: 300, transport: "interactions", thinkingLevels: NO_MINIMAL_THINKING },
+  // Gemini 2.5 Flash and Flash-Lite both returned Developer API 404s ("no longer available to new users") on 2026-10-01.
   { id: "google/gemma-4-31b-it", upstreamModel: "gemma-4-31b-it", contextWindowTokens: 262_144, quota: quota(30, 16_000, 14_400), preference: 200, transport: "interactions" },
   { id: "google/gemma-4-26b-a4b-it", upstreamModel: "gemma-4-26b-a4b-it", contextWindowTokens: 262_144, quota: quota(30, 16_000, 14_400), preference: 100, transport: "interactions" },
 ];
@@ -148,10 +150,18 @@ function transportFor(model: GoogleModel): GoogleTransport {
   return model.transport ?? "interactions";
 }
 
-function continuationTarget(model: GoogleModel): string {
+function interactionTarget(model: GoogleModel): string {
   return model.upstreamAgent
     ? `agent:${model.upstreamAgent}`
-    : `${transportFor(model)}:${model.upstreamModel}`;
+    : `interactions:${model.upstreamModel}`;
+}
+
+function generateContentTarget(model: GoogleModel): string {
+  return `generate-content:${model.upstreamModel}`;
+}
+
+function canReplayExternalToolHistory(model: GoogleModel): boolean {
+  return !model.upstreamAgent && model.upstreamModel.startsWith("gemini-");
 }
 
 function modelSupportsRequest(model: GoogleModel, body: ChatCompletionRequest): boolean {
@@ -513,6 +523,15 @@ function confirmsDailyQuota(error: unknown): boolean {
     || text.includes("daily quota");
 }
 
+interface GoogleRequestPlan {
+  body: ChatCompletionRequest;
+  transport: GoogleTransport;
+  target: string;
+  continuation?: Continuation;
+  replayExternalToolHistory: boolean;
+  bootstrapAntigravity: boolean;
+}
+
 export class GoogleProvider implements Provider {
   readonly id = "google";
   readonly priority = 10;
@@ -579,18 +598,111 @@ export class GoogleProvider implements Provider {
     return model;
   }
 
+  private safeContinuation(body: ChatCompletionRequest, target: string): Continuation | undefined {
+    const continuation = this.continuationFor(body, target);
+    if (!continuation) return undefined;
+    return hasAssistantToolCallsFrom(body, continuation.inputStartIndex)
+      ? undefined
+      : continuation;
+  }
+
+  private requestPlan(body: ChatCompletionRequest, model: GoogleModel): GoogleRequestPlan {
+    if (model.upstreamAgent) {
+      const target = interactionTarget(model);
+      const continuation = this.safeContinuation(body, target);
+      if (continuation) {
+        return {
+          body,
+          transport: "interactions",
+          target,
+          continuation,
+          replayExternalToolHistory: false,
+          bootstrapAntigravity: false,
+        };
+      }
+      const bootstrapAntigravity = hasGoogleToolHistory(body);
+      return {
+        body: bootstrapAntigravity ? toAntigravityBootstrapBody(body) : body,
+        transport: "interactions",
+        target,
+        replayExternalToolHistory: false,
+        bootstrapAntigravity,
+      };
+    }
+
+    const interactionContinuation = this.safeContinuation(body, interactionTarget(model));
+    const generateContinuation = this.safeContinuation(body, generateContentTarget(model));
+
+    if (
+      generateContinuation
+      && (!interactionContinuation || generateContinuation.inputStartIndex >= interactionContinuation.inputStartIndex)
+    ) {
+      return {
+        body,
+        transport: "generate-content",
+        target: generateContentTarget(model),
+        continuation: generateContinuation,
+        replayExternalToolHistory: false,
+        bootstrapAntigravity: false,
+      };
+    }
+
+    if (interactionContinuation && transportFor(model) !== "generate-content") {
+      return {
+        body,
+        transport: "interactions",
+        target: interactionTarget(model),
+        continuation: interactionContinuation,
+        replayExternalToolHistory: false,
+        bootstrapAntigravity: false,
+      };
+    }
+
+    const replayExternalToolHistory = hasGoogleToolHistory(body);
+    if (
+      transportFor(model) === "generate-content"
+      || (replayExternalToolHistory && canReplayExternalToolHistory(model))
+    ) {
+      return {
+        body,
+        transport: "generate-content",
+        target: generateContentTarget(model),
+        ...(generateContinuation ? { continuation: generateContinuation } : {}),
+        replayExternalToolHistory: replayExternalToolHistory && !generateContinuation,
+        bootstrapAntigravity: false,
+      };
+    }
+
+    return {
+      body,
+      transport: "interactions",
+      target: interactionTarget(model),
+      replayExternalToolHistory: false,
+      bootstrapAntigravity: false,
+    };
+  }
+
   private async countInputTokens(body: ChatCompletionRequest, modelId: string): Promise<number> {
     const model = this.modelById(modelId);
+    const plan = this.requestPlan(body, model);
+    const cacheKey = [
+      modelId,
+      plan.transport,
+      plan.target,
+      plan.continuation?.inputStartIndex ?? -1,
+      plan.replayExternalToolHistory ? "replay" : "native",
+      plan.bootstrapAntigravity ? "bootstrap" : "direct",
+    ].join(":");
     let perModel = this.tokenCountCache.get(body);
     if (!perModel) {
       perModel = new Map<string, Promise<number>>();
       this.tokenCountCache.set(body, perModel);
     }
-    const cached = perModel.get(modelId);
+    const cached = perModel.get(cacheKey);
     if (cached) return cached;
 
     const pending = Promise.resolve().then(async () => {
-      const input = toGoogleCountInput(body);
+      const input = toGoogleCountInput(plan.body);
       if (model.upstreamAgent) {
         const existingSystem = object(input.config?.systemInstruction);
         const existingParts = Array.isArray(existingSystem?.parts) ? existingSystem.parts : [];
@@ -606,17 +718,29 @@ export class GoogleProvider implements Provider {
         };
       }
       let contents = input.contents;
-      if (transportFor(model) === "generate-content") {
-        const continuation = this.continuationFor(body, continuationTarget(model));
+      if (plan.transport === "generate-content") {
         const request = toGoogleGenerateContentRequest(
-          body,
+          plan.body,
           model.upstreamModel,
-          continuation?.generateContents ? {
-            contents: continuation.generateContents,
-            inputStartIndex: continuation.inputStartIndex,
+          plan.continuation?.generateContents ? {
+            contents: plan.continuation.generateContents,
+            inputStartIndex: plan.continuation.inputStartIndex,
           } : undefined,
+          plan.replayExternalToolHistory,
         );
         contents = request.contents;
+      } else if (
+        hasGoogleToolHistory(plan.body)
+        && (model.upstreamAgent || canReplayExternalToolHistory(model))
+      ) {
+        // Google-native signatures are not representable in OpenAI tool_calls.
+        // Count an equivalent replay-safe Gemini request instead.
+        contents = toGoogleGenerateContentRequest(
+          plan.body,
+          model.upstreamModel,
+          undefined,
+          true,
+        ).contents;
       }
       if (input.config !== undefined) {
         return this.developerTokenCounter(this.googleApiKey(), model.upstreamModel, {
@@ -635,11 +759,11 @@ export class GoogleProvider implements Provider {
       }
       return response.totalTokens!;
     }).catch((error) => {
-      perModel!.delete(modelId);
+      perModel!.delete(cacheKey);
       throw error;
     });
 
-    perModel.set(modelId, pending);
+    perModel.set(cacheKey, pending);
     return pending;
   }
 
@@ -877,6 +1001,7 @@ export class GoogleProvider implements Provider {
     stream: AsyncIterable<unknown>,
     offer: ProviderOffer,
     body: ChatCompletionRequest,
+    upstreamTarget: string,
   ): Response {
     const encoder = new TextEncoder();
     const provider = this;
@@ -981,8 +1106,7 @@ export class GoogleProvider implements Provider {
                     })),
                   ],
                 };
-                const streamedModel = provider.modelById(offer.modelId);
-                provider.rememberContinuation(body, synthetic, continuationTarget(streamedModel));
+                provider.rememberContinuation(body, synthetic, upstreamTarget);
               }
               continue;
             }
@@ -1237,19 +1361,28 @@ export class GoogleProvider implements Provider {
     reserveQuota(model.quota, this.modelState(model.id), offer.inputTokens, Date.now());
 
     try {
-      const target = continuationTarget(model);
-      const continuation = this.continuationFor(body, target);
+      const plan = this.requestPlan(body, model);
+      if (plan.bootstrapAntigravity || plan.replayExternalToolHistory) {
+        log("info", "google_history_recovery", {
+          provider: this.id,
+          relay_model: model.id,
+          mode: plan.bootstrapAntigravity ? "antigravity_transcript" : "generate_content_replay",
+        });
+      }
+      const target = plan.target;
+      const continuation = plan.continuation;
       const client = this.googleClient();
       let response: Response;
 
-      if (transportFor(model) === "generate-content") {
+      if (plan.transport === "generate-content") {
         const request: GoogleGenerateContentRequest = toGoogleGenerateContentRequest(
-          body,
+          plan.body,
           model.upstreamModel,
           continuation?.generateContents ? {
             contents: continuation.generateContents,
             inputStartIndex: continuation.inputStartIndex,
           } : undefined,
+          plan.replayExternalToolHistory,
         );
         request.config = { ...request.config, abortSignal: signal };
 
@@ -1272,7 +1405,7 @@ export class GoogleProvider implements Provider {
         }
       } else {
         const request: GoogleInteractionRequest = toGoogleInteractionRequest(
-          body,
+          plan.body,
           model.upstreamModel,
           stream,
           continuation?.interactionId ? {
@@ -1286,7 +1419,7 @@ export class GoogleProvider implements Provider {
         const result = await client.interactions.create(interactionRequest as any, { fetchOptions: { signal } } as any);
 
         if (stream) {
-          response = this.openAIStream(result as unknown as AsyncIterable<unknown>, offer, body);
+          response = this.openAIStream(result as unknown as AsyncIterable<unknown>, offer, body, target);
         } else {
           const interaction = result as unknown;
           const value = object(interaction);

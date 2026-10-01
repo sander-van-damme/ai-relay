@@ -89,7 +89,6 @@ test("Google catalog contains eligible routes and excludes retired models", () =
     "google/gemini-3.1-flash-lite",
     "google/gemini-3-flash-preview",
     "google/gemini-robotics-er-2-preview",
-    "google/gemini-2.5-flash-lite",
     "google/gemma-4-31b-it",
     "google/gemma-4-26b-a4b-it",
   ]);
@@ -112,6 +111,7 @@ test("Google catalog contains eligible routes and excludes retired models", () =
   assert.deepEqual(robotics.thinkingLevels, ["minimal", "low", "medium", "high"]);
 
   assert.equal(GOOGLE_MODELS.some((model) => model.id === "google/gemini-2.5-flash"), false);
+  assert.equal(GOOGLE_MODELS.some((model) => model.id === "google/gemini-2.5-flash-lite"), false);
 
   const flashLite = GOOGLE_MODELS.find((model) => model.id === "google/gemini-3.5-flash-lite")!;
   assert.equal(flashLite.quota.limits.requestsPerMinute, 15);
@@ -381,6 +381,294 @@ test("Antigravity uses the agent API with Search and caller-provided functions o
     assert.deepEqual(requests[1]?.input, [
       { type: "user_input", content: [{ type: "text", text: "Continue." }] },
     ]);
+  } finally {
+    if (originalKey === undefined) delete process.env.GEMINI_API_KEY;
+    else process.env.GEMINI_API_KEY = originalKey;
+  }
+});
+
+test("Antigravity keeps native tool-call continuations stateful", async () => {
+  const originalKey = process.env.GEMINI_API_KEY;
+  process.env.GEMINI_API_KEY = "test";
+  const antigravity = GOOGLE_MODELS.find((model) => model.id === "google/antigravity-preview-09-2026")!;
+  const requests: Array<Record<string, unknown>> = [];
+  let call = 0;
+
+  try {
+    const provider = new GoogleProvider(
+      () => fakeClient((request) => {
+        requests.push(request as Record<string, unknown>);
+        call += 1;
+        if (call === 1) {
+          return {
+            id: "native-agent-call",
+            status: "requires_action",
+            created: "2026-10-01T08:00:00Z",
+            steps: [{
+              type: "function_call",
+              id: "call_native",
+              name: "read_file",
+              arguments: { path: "a.ts" },
+            }],
+            usage: { total_input_tokens: 10, total_output_tokens: 2, total_tokens: 12 },
+          };
+        }
+        return completedInteraction("native-agent-result", "Done");
+      }),
+      [antigravity],
+      async () => 20,
+    );
+
+    const tools = [{
+      type: "function",
+      function: {
+        name: "read_file",
+        parameters: { type: "object", properties: { path: { type: "string" } } },
+      },
+    }];
+    const firstBody = {
+      messages: [{ role: "user", content: "Inspect a.ts" }],
+      tools,
+      tool_choice: "auto",
+    };
+    const firstOffer = (await bestOffer(provider, {
+      ...standardRequest,
+      body: firstBody,
+      requestedModel: antigravity.id,
+    }, Date.now()))!;
+    const firstResult = await provider.execute(firstOffer, firstBody, false, new AbortController().signal);
+    assert.equal(firstResult.status, "success");
+    if (firstResult.status !== "success") return;
+    const firstPayload = await firstResult.response.json() as Record<string, unknown>;
+    firstResult.release();
+
+    const firstChoice = (firstPayload.choices as Array<Record<string, unknown>>)[0]!;
+    const assistant = firstChoice.message as Record<string, unknown>;
+    const secondBody = {
+      messages: [
+        ...firstBody.messages,
+        assistant,
+        { role: "tool", tool_call_id: "call_native", content: "file contents" },
+      ],
+      tools,
+      tool_choice: "auto",
+    };
+    const secondOffer = (await bestOffer(provider, {
+      ...standardRequest,
+      body: secondBody,
+      requestedModel: antigravity.id,
+    }, Date.now()))!;
+    const secondResult = await provider.execute(secondOffer, secondBody, false, new AbortController().signal);
+    assert.equal(secondResult.status, "success");
+    if (secondResult.status === "success") secondResult.release();
+
+    assert.equal(requests[1]?.previous_interaction_id, "native-agent-call");
+    assert.deepEqual(requests[1]?.input, [{
+      type: "function_result",
+      name: "read_file",
+      call_id: "call_native",
+      result: [{ type: "text", text: "file contents" }],
+    }]);
+  } finally {
+    if (originalKey === undefined) delete process.env.GEMINI_API_KEY;
+    else process.env.GEMINI_API_KEY = originalKey;
+  }
+});
+
+test("Antigravity bootstraps external tool history as text, then resumes statefully", async () => {
+  const originalKey = process.env.GEMINI_API_KEY;
+  process.env.GEMINI_API_KEY = "test";
+  const antigravity = GOOGLE_MODELS.find((model) => model.id === "google/antigravity-preview-09-2026")!;
+  const requests: Array<Record<string, unknown>> = [];
+  const countInputs: Array<Record<string, unknown>> = [];
+  let call = 0;
+
+  try {
+    const provider = new GoogleProvider(
+      () => fakeClient((request) => {
+        requests.push(request as Record<string, unknown>);
+        call += 1;
+        return completedInteraction(`bootstrap-agent-${call}`, call === 1 ? "Recovered context" : "Continued");
+      }),
+      [antigravity],
+      async (_apiKey, _model, input) => {
+        countInputs.push(input as unknown as Record<string, unknown>);
+        return 50;
+      },
+    );
+
+    const tools = [{
+      type: "function",
+      function: {
+        name: "read_file",
+        parameters: { type: "object", properties: { path: { type: "string" } } },
+      },
+    }];
+    const recoveredBody = {
+      messages: [
+        { role: "user", content: "Inspect a.ts" },
+        {
+          role: "assistant",
+          content: null,
+          tool_calls: [{
+            id: "call_external",
+            type: "function",
+            function: { name: "read_file", arguments: "{\"path\":\"a.ts\"}" },
+          }],
+        },
+        { role: "tool", tool_call_id: "call_external", content: "export const x = 1;" },
+        { role: "user", content: "Continue from that result." },
+      ],
+      tools,
+      tool_choice: "auto",
+    };
+
+    const firstOffer = (await bestOffer(provider, {
+      ...standardRequest,
+      body: recoveredBody,
+      requestedModel: antigravity.id,
+    }, Date.now()))!;
+    const firstResult = await provider.execute(firstOffer, recoveredBody, false, new AbortController().signal);
+    assert.equal(firstResult.status, "success");
+    if (firstResult.status !== "success") return;
+    firstResult.release();
+
+    const firstCountContents = countInputs[0]?.contents as Array<Record<string, unknown>>;
+    assert.equal(firstCountContents.length, 1);
+    assert.match(JSON.stringify(firstCountContents), /historical conversation context/i);
+    assert.match(JSON.stringify(firstCountContents), /call_external/);
+
+    assert.equal(requests[0]?.previous_interaction_id, undefined);
+    const bootstrapInput = requests[0]?.input as Array<Record<string, unknown>>;
+    assert.equal(bootstrapInput.length, 1);
+    assert.equal(bootstrapInput[0]?.type, "user_input");
+    assert.match(JSON.stringify(bootstrapInput), /ASSISTANT TOOL CALL/);
+    assert.doesNotMatch(JSON.stringify(bootstrapInput), /"type":"function_call"/);
+
+    const secondBody = {
+      ...recoveredBody,
+      messages: [
+        ...recoveredBody.messages,
+        { role: "assistant", content: "Recovered context" },
+        { role: "user", content: "One more thing." },
+      ],
+    };
+    const secondOffer = (await bestOffer(provider, {
+      ...standardRequest,
+      body: secondBody,
+      requestedModel: antigravity.id,
+    }, Date.now()))!;
+    const secondResult = await provider.execute(secondOffer, secondBody, false, new AbortController().signal);
+    assert.equal(secondResult.status, "success");
+    if (secondResult.status === "success") secondResult.release();
+
+    assert.equal(requests[1]?.previous_interaction_id, "bootstrap-agent-1");
+    assert.deepEqual(requests[1]?.input, [
+      { type: "user_input", content: [{ type: "text", text: "One more thing." }] },
+    ]);
+  } finally {
+    if (originalKey === undefined) delete process.env.GEMINI_API_KEY;
+    else process.env.GEMINI_API_KEY = originalKey;
+  }
+});
+
+test("Gemini replays external tool history through GenerateContent and keeps native continuation", async () => {
+  const originalKey = process.env.GEMINI_API_KEY;
+  process.env.GEMINI_API_KEY = "test";
+  const gemini = GOOGLE_MODELS.find((model) => model.id === "google/gemini-3.8-flash")!;
+  const requests: Array<Record<string, unknown>> = [];
+  let call = 0;
+
+  try {
+    const provider = new GoogleProvider(
+      () => fakeClient((request) => {
+        requests.push(request as Record<string, unknown>);
+        call += 1;
+        return {
+          responseId: `replay-${call}`,
+          createTime: "2026-10-01T08:00:00Z",
+          candidates: [{
+            finishReason: "STOP",
+            content: {
+              role: "model",
+              parts: [{ text: call === 1 ? "Recovered" : "Continued", thoughtSignature: `native-${call}` }],
+            },
+          }],
+          usageMetadata: { promptTokenCount: 30, candidatesTokenCount: 2, totalTokenCount: 32 },
+        };
+      }),
+      [gemini],
+      async () => 30,
+    );
+
+    const tools = [{
+      type: "function",
+      function: {
+        name: "read_file",
+        parameters: { type: "object", properties: { path: { type: "string" } } },
+      },
+    }];
+    const recoveredBody = {
+      messages: [
+        { role: "user", content: "Inspect a.ts" },
+        {
+          role: "assistant",
+          content: null,
+          tool_calls: [{
+            id: "call_external",
+            type: "function",
+            function: { name: "read_file", arguments: "{\"path\":\"a.ts\"}" },
+          }],
+        },
+        { role: "tool", tool_call_id: "call_external", content: "export const x = 1;" },
+        { role: "user", content: "Continue." },
+      ],
+      tools,
+      tool_choice: "auto",
+    };
+
+    const firstOffer = (await bestOffer(provider, {
+      ...standardRequest,
+      body: recoveredBody,
+      requestedModel: gemini.id,
+    }, Date.now()))!;
+    const firstResult = await provider.execute(firstOffer, recoveredBody, false, new AbortController().signal);
+    assert.equal(firstResult.status, "success");
+    if (firstResult.status !== "success") return;
+    firstResult.release();
+
+    assert.equal(requests[0]?.input, undefined);
+    const firstContents = requests[0]?.contents as Array<Record<string, unknown>>;
+    const externalModel = firstContents[1] as Record<string, unknown>;
+    const externalParts = externalModel.parts as Array<Record<string, unknown>>;
+    assert.equal(externalParts[0]?.thoughtSignature, "skip_thought_signature_validator");
+
+    const secondBody = {
+      ...recoveredBody,
+      messages: [
+        ...recoveredBody.messages,
+        { role: "assistant", content: "Recovered" },
+        { role: "user", content: "Continue again." },
+      ],
+    };
+    const secondOffer = (await bestOffer(provider, {
+      ...standardRequest,
+      body: secondBody,
+      requestedModel: gemini.id,
+    }, Date.now()))!;
+    const secondResult = await provider.execute(secondOffer, secondBody, false, new AbortController().signal);
+    assert.equal(secondResult.status, "success");
+    if (secondResult.status === "success") secondResult.release();
+
+    const secondContents = requests[1]?.contents as Array<Record<string, unknown>>;
+    assert.equal(secondContents.length, firstContents.length + 2);
+    const savedNativeModel = secondContents[secondContents.length - 2] as Record<string, unknown>;
+    const savedNativeParts = savedNativeModel.parts as Array<Record<string, unknown>>;
+    assert.equal(savedNativeParts[0]?.thoughtSignature, "native-1");
+    assert.deepEqual(secondContents[secondContents.length - 1], {
+      role: "user",
+      parts: [{ text: "Continue again." }],
+    });
   } finally {
     if (originalKey === undefined) delete process.env.GEMINI_API_KEY;
     else process.env.GEMINI_API_KEY = originalKey;
