@@ -160,6 +160,70 @@ test("Google interaction response is translated to OpenAI chat-completion shape"
   });
 });
 
+test("Google counts system instructions and tools through the full Developer API request", async () => {
+  const originalKey = process.env.GEMINI_API_KEY;
+  process.env.GEMINI_API_KEY = "test";
+  let sdkCountCalls = 0;
+  const developerCounts: Array<{
+    apiKey: string;
+    model: string;
+    input: Record<string, unknown>;
+  }> = [];
+
+  try {
+    const provider = new GoogleProvider(
+      () => fakeClient(
+        () => completedInteraction("unused"),
+        () => { sdkCountCalls += 1; },
+      ),
+      [TEST_MODEL],
+      async (apiKey, model, input) => {
+        developerCounts.push({
+          apiKey,
+          model,
+          input: input as unknown as Record<string, unknown>,
+        });
+        return 37;
+      },
+    );
+    const body = {
+      messages: [
+        { role: "system", content: "Follow the task carefully." },
+        { role: "user", content: "Inspect the project." },
+      ],
+      tools: [{
+        type: "function",
+        function: {
+          name: "read_file",
+          description: "Read a file",
+          parameters: {
+            type: "object",
+            properties: { path: { type: "string" } },
+            required: ["path"],
+          },
+        },
+      }],
+    };
+
+    const offer = await bestOffer(provider, {
+      ...standardRequest,
+      body,
+    }, Date.now());
+
+    assert.equal(offer?.inputTokens, 37);
+    assert.equal(sdkCountCalls, 0);
+    assert.equal(developerCounts.length, 1);
+    assert.equal(developerCounts[0]?.apiKey, "test");
+    assert.equal(developerCounts[0]?.model, "test-model");
+    const config = developerCounts[0]?.input.config as Record<string, unknown>;
+    assert.match(JSON.stringify(config.systemInstruction), /Follow the task carefully/);
+    assert.match(JSON.stringify(config.tools), /read_file/);
+  } finally {
+    if (originalKey === undefined) delete process.env.GEMINI_API_KEY;
+    else process.env.GEMINI_API_KEY = originalKey;
+  }
+});
+
 test("Google execution uses the official Interactions API and reuses stored continuation", async () => {
   const originalKey = process.env.GEMINI_API_KEY;
   process.env.GEMINI_API_KEY = "test";
@@ -219,10 +283,17 @@ test("Antigravity uses the agent API with Search and caller-provided functions o
     requests.push(request as Record<string, unknown>);
     call += 1;
     return completedInteraction(`agent-${call}`, call === 1 ? "First answer" : "Second answer");
-  }, (request) => countRequests.push(request as Record<string, unknown>));
+  });
 
   try {
-    const provider = new GoogleProvider(() => client, [antigravity]);
+    const provider = new GoogleProvider(
+      () => client,
+      [antigravity],
+      async (_apiKey, model, input) => {
+        countRequests.push({ model, config: input.config } as Record<string, unknown>);
+        return 10;
+      },
+    );
     const tools = [{
       type: "function",
       function: {
