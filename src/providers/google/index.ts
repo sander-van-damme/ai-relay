@@ -316,9 +316,22 @@ export class GoogleProvider implements Provider {
 
     const pending = Promise.resolve().then(async () => {
       const input = toGoogleCountInput(body);
+      let contents = input.contents;
+      if (transportFor(model) === "generate-content") {
+        const continuation = this.continuationFor(body, model.upstreamModel);
+        const request = toGoogleGenerateContentRequest(
+          body,
+          model.upstreamModel,
+          continuation?.generateContents ? {
+            contents: continuation.generateContents,
+            inputStartIndex: continuation.inputStartIndex,
+          } : undefined,
+        );
+        contents = request.contents;
+      }
       const response = await this.googleClient().models.countTokens({
         model: model.upstreamModel,
-        contents: input.contents,
+        contents,
         config: {
           ...input.config,
           abortSignal: AbortSignal.timeout(10_000),
@@ -340,6 +353,7 @@ export class GoogleProvider implements Provider {
   private async candidate(model: GoogleModel, index: number, request: OfferRequest, now: number): Promise<Candidate | null> {
     if (request.excludedModelIds.has(model.id)) return null;
     if (request.requestedModel !== "auto" && request.requestedModel !== model.id) return null;
+    if (!modelSupportsRequest(model, request.body)) return null;
 
     const inputTokens = await this.countInputTokens(request.body, model.id);
     if (!quotaCanEverHandle(model.quota, inputTokens, model.contextWindowTokens)) return null;
