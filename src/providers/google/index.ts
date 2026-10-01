@@ -160,10 +160,8 @@ function generateContentTarget(model: GoogleModel): string {
   return `generate-content:${model.upstreamModel}`;
 }
 
-function continuationTarget(model: GoogleModel): string {
-  return transportFor(model) === "generate-content"
-    ? generateContentTarget(model)
-    : interactionTarget(model);
+function canReplayExternalToolHistory(model: GoogleModel): boolean {
+  return !model.upstreamAgent && model.upstreamModel.startsWith("gemini-");
 }
 
 function modelSupportsRequest(model: GoogleModel, body: ChatCompletionRequest): boolean {
@@ -661,7 +659,10 @@ export class GoogleProvider implements Provider {
     }
 
     const replayExternalToolHistory = hasGoogleToolHistory(body);
-    if (transportFor(model) === "generate-content" || replayExternalToolHistory) {
+    if (
+      transportFor(model) === "generate-content"
+      || (replayExternalToolHistory && canReplayExternalToolHistory(model))
+    ) {
       return {
         body,
         transport: "generate-content",
@@ -728,6 +729,15 @@ export class GoogleProvider implements Provider {
           plan.replayExternalToolHistory,
         );
         contents = request.contents;
+      } else if (hasGoogleToolHistory(plan.body)) {
+        // Interactions continuation state contains native signatures that are not representable
+        // in OpenAI tool_calls. Count an equivalent replay-safe Gemini request instead.
+        contents = toGoogleGenerateContentRequest(
+          plan.body,
+          model.upstreamModel,
+          undefined,
+          true,
+        ).contents;
       }
       if (input.config !== undefined) {
         return this.developerTokenCounter(this.googleApiKey(), model.upstreamModel, {
@@ -1349,6 +1359,12 @@ export class GoogleProvider implements Provider {
 
     try {
       const plan = this.requestPlan(body, model);
+      if (plan.bootstrapAntigravity || plan.replayExternalToolHistory) {
+        log("info", "google_history_recovery", {
+          relay_model: model.id,
+          mode: plan.bootstrapAntigravity ? "antigravity_transcript" : "generate_content_replay",
+        });
+      }
       const target = plan.target;
       const continuation = plan.continuation;
       const client = this.googleClient();
