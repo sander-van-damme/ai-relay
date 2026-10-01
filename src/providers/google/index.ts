@@ -37,6 +37,14 @@ const OVERFLOW_HARD_CAP_TTL_MS = 24 * 60 * 60 * 1000;
 const CONTINUATION_TTL_MS = 60 * 60 * 1000;
 const MAX_CONTINUATIONS = 1_000;
 const OVERFLOW_LIMITS = new Set<QuotaLimitName>(["requestsPerDay"]);
+const ANTIGRAVITY_AGENT = "antigravity-preview-09-2026";
+const ANTIGRAVITY_SYSTEM_INSTRUCTION = [
+  "You are operating as the reasoning backend for an OpenAI-compatible chat-completions interface.",
+  "Follow the supplied conversation and its instructions.",
+  "Caller-provided function tools operate on the caller's authoritative external environment; use them when appropriate.",
+  "Do not assume access to any filesystem, shell, code-execution environment, or remote environment beyond explicitly supplied tools.",
+  "Google Search is available for public information.",
+].join(" ");
 
 export type GoogleTransport = "interactions" | "generate-content";
 export type GoogleThinkingLevel = "minimal" | "low" | "medium" | "high";
@@ -44,8 +52,10 @@ export type GoogleThinkingLevel = "minimal" | "low" | "medium" | "high";
 export interface GoogleModel {
   id: string;
   upstreamModel: string;
+  upstreamAgent?: string;
   contextWindowTokens: number;
   quota: QuotaPolicy;
+  preference: number;
   transport?: GoogleTransport;
   thinkingLevels?: readonly GoogleThinkingLevel[];
 }
@@ -60,7 +70,7 @@ interface Candidate {
 
 interface Continuation {
   inputStartIndex: number;
-  upstreamModel: string;
+  upstreamTarget: string;
   expiresAt: number;
   interactionId?: string;
   generateContents?: Content[];
@@ -88,18 +98,19 @@ const ALL_THINKING: readonly GoogleThinkingLevel[] = ["minimal", "low", "medium"
 const NO_MINIMAL_THINKING: readonly GoogleThinkingLevel[] = ["low", "medium", "high"];
 
 export const GOOGLE_MODELS: readonly GoogleModel[] = [
-  { id: "google/gemma-4-26b-a4b-it", upstreamModel: "gemma-4-26b-a4b-it", contextWindowTokens: 262_144, quota: quota(30, 16_000, 14_400), transport: "interactions" },
-  { id: "google/gemma-4-31b-it", upstreamModel: "gemma-4-31b-it", contextWindowTokens: 262_144, quota: quota(30, 16_000, 14_400), transport: "interactions" },
-  { id: "google/gemini-robotics-er-2-preview", upstreamModel: "gemini-robotics-er-2-preview", contextWindowTokens: 131_072, quota: quota(5, 250_000, 20), transport: "interactions", thinkingLevels: ALL_THINKING },
-  { id: "google/gemini-3.5-flash-lite", upstreamModel: "gemini-3.5-flash-lite", contextWindowTokens: 1_048_576, quota: quota(15, 250_000, 500), transport: "interactions", thinkingLevels: ALL_THINKING },
-  { id: "google/gemini-3.1-flash-lite", upstreamModel: "gemini-3.1-flash-lite", contextWindowTokens: 1_048_576, quota: quota(15, 250_000, 500), transport: "interactions", thinkingLevels: ALL_THINKING },
-  { id: "google/gemini-2.5-flash-lite", upstreamModel: "gemini-2.5-flash-lite", contextWindowTokens: 1_048_576, quota: quota(10, 250_000, 20), transport: "interactions", thinkingLevels: NO_MINIMAL_THINKING },
-  { id: "google/gemini-3.8-flash", upstreamModel: "gemini-3.8-flash", contextWindowTokens: 1_048_576, quota: quota(5, 250_000, 20), transport: "interactions", thinkingLevels: NO_MINIMAL_THINKING },
-  { id: "google/gemini-3.7-flash", upstreamModel: "gemini-3.7-flash", contextWindowTokens: 1_048_576, quota: quota(5, 250_000, 20), transport: "interactions", thinkingLevels: NO_MINIMAL_THINKING },
-  { id: "google/gemini-3.6-flash", upstreamModel: "gemini-3.6-flash", contextWindowTokens: 1_048_576, quota: quota(5, 250_000, 20), transport: "interactions", thinkingLevels: ALL_THINKING },
-  { id: "google/gemini-3.5-flash", upstreamModel: "gemini-3.5-flash", contextWindowTokens: 1_048_576, quota: quota(5, 250_000, 20), transport: "interactions", thinkingLevels: ALL_THINKING },
-  { id: "google/gemini-3-flash-preview", upstreamModel: "gemini-3-flash-preview", contextWindowTokens: 1_048_576, quota: quota(5, 250_000, 20), transport: "interactions", thinkingLevels: ALL_THINKING },
-  { id: "google/gemini-2.5-flash", upstreamModel: "gemini-2.5-flash", contextWindowTokens: 1_048_576, quota: quota(5, 250_000, 20), transport: "interactions", thinkingLevels: NO_MINIMAL_THINKING },
+  { id: "google/gemini-3.8-flash", upstreamModel: "gemini-3.8-flash", contextWindowTokens: 1_048_576, quota: quota(5, 250_000, 20), preference: 1_300, transport: "interactions", thinkingLevels: NO_MINIMAL_THINKING },
+  { id: "google/antigravity-preview-09-2026", upstreamModel: "gemini-3.8-flash", upstreamAgent: ANTIGRAVITY_AGENT, contextWindowTokens: 1_048_576, quota: quota(60, 100_000, 100), preference: 1_200, transport: "interactions" },
+  { id: "google/gemini-3.7-flash", upstreamModel: "gemini-3.7-flash", contextWindowTokens: 1_048_576, quota: quota(5, 250_000, 20), preference: 1_100, transport: "interactions", thinkingLevels: NO_MINIMAL_THINKING },
+  { id: "google/gemini-3.6-flash", upstreamModel: "gemini-3.6-flash", contextWindowTokens: 1_048_576, quota: quota(5, 250_000, 20), preference: 1_000, transport: "interactions", thinkingLevels: ALL_THINKING },
+  { id: "google/gemini-3.5-flash", upstreamModel: "gemini-3.5-flash", contextWindowTokens: 1_048_576, quota: quota(5, 250_000, 20), preference: 900, transport: "interactions", thinkingLevels: ALL_THINKING },
+  { id: "google/gemini-3.5-flash-lite", upstreamModel: "gemini-3.5-flash-lite", contextWindowTokens: 1_048_576, quota: quota(15, 250_000, 500), preference: 800, transport: "interactions", thinkingLevels: ALL_THINKING },
+  { id: "google/gemini-3.1-flash-lite", upstreamModel: "gemini-3.1-flash-lite", contextWindowTokens: 1_048_576, quota: quota(15, 250_000, 500), preference: 700, transport: "interactions", thinkingLevels: ALL_THINKING },
+  { id: "google/gemini-3-flash-preview", upstreamModel: "gemini-3-flash-preview", contextWindowTokens: 1_048_576, quota: quota(5, 250_000, 20), preference: 600, transport: "interactions", thinkingLevels: ALL_THINKING },
+  { id: "google/gemini-robotics-er-2-preview", upstreamModel: "gemini-robotics-er-2-preview", contextWindowTokens: 131_072, quota: quota(5, 250_000, 20), preference: 500, transport: "interactions", thinkingLevels: ALL_THINKING },
+  { id: "google/gemini-2.5-flash", upstreamModel: "gemini-2.5-flash", contextWindowTokens: 1_048_576, quota: quota(5, 250_000, 20), preference: 400, transport: "interactions", thinkingLevels: NO_MINIMAL_THINKING },
+  { id: "google/gemini-2.5-flash-lite", upstreamModel: "gemini-2.5-flash-lite", contextWindowTokens: 1_048_576, quota: quota(10, 250_000, 20), preference: 300, transport: "interactions", thinkingLevels: NO_MINIMAL_THINKING },
+  { id: "google/gemma-4-31b-it", upstreamModel: "gemma-4-31b-it", contextWindowTokens: 262_144, quota: quota(30, 16_000, 14_400), preference: 200, transport: "interactions" },
+  { id: "google/gemma-4-26b-a4b-it", upstreamModel: "gemma-4-26b-a4b-it", contextWindowTokens: 262_144, quota: quota(30, 16_000, 14_400), preference: 100, transport: "interactions" },
 ];
 
 function object(value: unknown): JsonObject | null {
@@ -111,12 +122,14 @@ function object(value: unknown): JsonObject | null {
 function compareCapacity(left: Candidate, right: Candidate): number {
   return left.inputCapacityTokens - right.inputCapacityTokens
     || left.availableAt - right.availableAt
+    || right.model.preference - left.model.preference
     || left.index - right.index;
 }
 
 function compareAvailability(left: Candidate, right: Candidate): number {
   return left.availableAt - right.availableAt
     || left.inputCapacityTokens - right.inputCapacityTokens
+    || right.model.preference - left.model.preference
     || left.index - right.index;
 }
 
@@ -132,7 +145,23 @@ function transportFor(model: GoogleModel): GoogleTransport {
   return model.transport ?? "interactions";
 }
 
+function continuationTarget(model: GoogleModel): string {
+  return model.upstreamAgent
+    ? `agent:${model.upstreamAgent}`
+    : `${transportFor(model)}:${model.upstreamModel}`;
+}
+
 function modelSupportsRequest(model: GoogleModel, body: ChatCompletionRequest): boolean {
+  if (model.upstreamAgent) {
+    if (
+      body.temperature !== undefined
+      || body.top_p !== undefined
+      || body.stop !== undefined
+      || body.seed !== undefined
+      || body.reasoning_effort !== undefined
+    ) return false;
+    if (body.tool_choice !== undefined && body.tool_choice !== "auto") return false;
+  }
   const effort = body.reasoning_effort;
   if (effort !== undefined) {
     if (effort !== "minimal" && effort !== "low" && effort !== "medium" && effort !== "high") return true;
@@ -142,6 +171,59 @@ function modelSupportsRequest(model: GoogleModel, body: ChatCompletionRequest): 
     return false;
   }
   return true;
+}
+
+interface GoogleAgentInteractionRequest {
+  agent: string;
+  agent_config: {
+    type: "antigravity";
+    model: string;
+    max_total_tokens?: string;
+  };
+  input: GoogleInteractionRequest["input"];
+  store: true;
+  stream: boolean;
+  previous_interaction_id?: string;
+  system_instruction?: string;
+  tools: Array<
+    | { type: "google_search" }
+    | NonNullable<GoogleInteractionRequest["tools"]>[number]
+  >;
+  response_format?: GoogleInteractionRequest["response_format"];
+}
+
+function antigravityRequest(
+  request: GoogleInteractionRequest,
+  model: GoogleModel,
+): GoogleAgentInteractionRequest {
+  if (!model.upstreamAgent) throw new Error(`Google model ${model.id} is not an agent route.`);
+  const unsupported = Object.keys(request.generation_config ?? {})
+    .filter((key) => key !== "max_output_tokens");
+  if (unsupported.length > 0) {
+    throw new Error(`Antigravity does not support Chat Completions options: ${unsupported.join(", ")}.`);
+  }
+
+  const maxOutputTokens = request.generation_config?.max_output_tokens;
+  return {
+    agent: model.upstreamAgent,
+    agent_config: {
+      type: "antigravity",
+      model: model.upstreamModel,
+      ...(maxOutputTokens !== undefined ? { max_total_tokens: String(maxOutputTokens) } : {}),
+    },
+    input: request.input,
+    store: true,
+    stream: request.stream,
+    ...(request.previous_interaction_id ? { previous_interaction_id: request.previous_interaction_id } : {}),
+    system_instruction: request.system_instruction
+      ? `${ANTIGRAVITY_SYSTEM_INSTRUCTION}\n\n${request.system_instruction}`
+      : ANTIGRAVITY_SYSTEM_INSTRUCTION,
+    tools: [
+      { type: "google_search" },
+      ...(request.tools ?? []),
+    ],
+    ...(request.response_format ? { response_format: request.response_format } : {}),
+  };
 }
 
 function assistantMessageFromInteraction(interaction: unknown): JsonObject {
@@ -439,9 +521,19 @@ export class GoogleProvider implements Provider {
 
     const pending = Promise.resolve().then(async () => {
       const input = toGoogleCountInput(body);
+      if (model.upstreamAgent) {
+        const existingSystem = object(input.config?.systemInstruction);
+        const existingParts = Array.isArray(existingSystem?.parts) ? existingSystem.parts : [];
+        input.config = {
+          ...input.config,
+          systemInstruction: {
+            parts: [{ text: ANTIGRAVITY_SYSTEM_INSTRUCTION }, ...existingParts as any[]],
+          },
+        };
+      }
       let contents = input.contents;
       if (transportFor(model) === "generate-content") {
-        const continuation = this.continuationFor(body, model.upstreamModel);
+        const continuation = this.continuationFor(body, continuationTarget(model));
         const request = toGoogleGenerateContentRequest(
           body,
           model.upstreamModel,
@@ -501,7 +593,7 @@ export class GoogleProvider implements Provider {
         model,
         inputTokens,
         inputCapacityTokens: effectiveInputCapacity(model.quota, model.contextWindowTokens),
-        availableAt: evaluatedAt,
+        availableAt: now,
         index,
       };
     }
@@ -511,7 +603,9 @@ export class GoogleProvider implements Provider {
       model,
       inputTokens,
       inputCapacityTokens: effectiveInputCapacity(model.quota, model.contextWindowTokens),
-      availableAt: Number.isFinite(delayMs) ? evaluatedAt + Math.max(0, delayMs) : Number.POSITIVE_INFINITY,
+      availableAt: Number.isFinite(delayMs)
+        ? (delayMs <= 0 ? now : evaluatedAt + delayMs)
+        : Number.POSITIVE_INFINITY,
       index,
     };
   }
@@ -607,18 +701,18 @@ export class GoogleProvider implements Provider {
     }
   }
 
-  private continuationFor(body: ChatCompletionRequest, upstreamModel: string): Continuation | undefined {
+  private continuationFor(body: ChatCompletionRequest, upstreamTarget: string): Continuation | undefined {
     const messages = messageArray(body);
     if (!messages) return undefined;
     this.pruneContinuations();
     for (let length = messages.length; length > 0; length -= 1) {
       const continuation = this.continuations.get(prefixKey(messages.slice(0, length)));
-      if (continuation?.upstreamModel === upstreamModel) return continuation;
+      if (continuation?.upstreamTarget === upstreamTarget) return continuation;
     }
     return undefined;
   }
 
-  private rememberContinuation(body: ChatCompletionRequest, interaction: unknown, upstreamModel: string): void {
+  private rememberContinuation(body: ChatCompletionRequest, interaction: unknown, upstreamTarget: string): void {
     const messages = messageArray(body);
     const value = object(interaction);
     if (!messages || typeof value?.id !== "string") return;
@@ -628,7 +722,7 @@ export class GoogleProvider implements Provider {
     this.continuations.set(prefixKey(continued), {
       interactionId: value.id,
       inputStartIndex: continued.length,
-      upstreamModel,
+      upstreamTarget,
       expiresAt: Date.now() + CONTINUATION_TTL_MS,
     });
     this.pruneContinuations();
@@ -638,7 +732,7 @@ export class GoogleProvider implements Provider {
     body: ChatCompletionRequest,
     response: unknown,
     requestContents: Content[],
-    upstreamModel: string,
+    upstreamTarget: string,
   ): void {
     const messages = messageArray(body);
     if (!messages) return;
@@ -649,7 +743,7 @@ export class GoogleProvider implements Provider {
     this.continuations.set(prefixKey(continued), {
       generateContents: [...requestContents, generated.modelContent],
       inputStartIndex: continued.length,
-      upstreamModel,
+      upstreamTarget,
       expiresAt: Date.now() + CONTINUATION_TTL_MS,
     });
     this.pruneContinuations();
@@ -669,7 +763,7 @@ export class GoogleProvider implements Provider {
     this.continuations.set(prefixKey(continued), {
       generateContents: [...requestContents, modelContent],
       inputStartIndex: continued.length,
-      upstreamModel,
+      upstreamTarget,
       expiresAt: Date.now() + CONTINUATION_TTL_MS,
     });
     this.pruneContinuations();
@@ -783,7 +877,8 @@ export class GoogleProvider implements Provider {
                     })),
                   ],
                 };
-                provider.rememberContinuation(body, synthetic, provider.modelById(offer.modelId).upstreamModel);
+                const streamedModel = provider.modelById(offer.modelId);
+                provider.rememberContinuation(body, synthetic, continuationTarget(streamedModel));
               }
               continue;
             }
@@ -1026,7 +1121,8 @@ export class GoogleProvider implements Provider {
     reserveQuota(model.quota, this.modelState(model.id), offer.inputTokens, Date.now());
 
     try {
-      const continuation = this.continuationFor(body, model.upstreamModel);
+      const target = continuationTarget(model);
+      const continuation = this.continuationFor(body, target);
       const client = this.googleClient();
       let response: Response;
 
@@ -1048,11 +1144,11 @@ export class GoogleProvider implements Provider {
             offer,
             body,
             request.contents,
-            model.upstreamModel,
+            target,
           );
         } else {
           const result = await client.models.generateContent(request as any);
-          this.rememberGenerateContinuation(body, result, request.contents, model.upstreamModel);
+          this.rememberGenerateContinuation(body, result, request.contents, target);
           response = new Response(JSON.stringify(googleGenerateContentToOpenAI(result, offer.modelId, offer.inputTokens)), {
             status: 200,
             headers: { "content-type": "application/json; charset=utf-8" },
@@ -1068,7 +1164,10 @@ export class GoogleProvider implements Provider {
             inputStartIndex: continuation.inputStartIndex,
           } : undefined,
         );
-        const result = await client.interactions.create(request as any, { fetchOptions: { signal } } as any);
+        const interactionRequest = model.upstreamAgent
+          ? antigravityRequest(request, model)
+          : request;
+        const result = await client.interactions.create(interactionRequest as any, { fetchOptions: { signal } } as any);
 
         if (stream) {
           response = this.openAIStream(result as unknown as AsyncIterable<unknown>, offer, body);
@@ -1084,7 +1183,7 @@ export class GoogleProvider implements Provider {
               bodyText: JSON.stringify({ error: value.errors ?? { message: `Google interaction ${value.status}.` } }),
             };
           }
-          this.rememberContinuation(body, interaction, model.upstreamModel);
+          this.rememberContinuation(body, interaction, target);
           response = new Response(JSON.stringify(googleInteractionToOpenAI(interaction, offer.modelId, offer.inputTokens)), {
             status: 200,
             headers: { "content-type": "application/json; charset=utf-8" },
