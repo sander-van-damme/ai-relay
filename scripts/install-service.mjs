@@ -21,6 +21,14 @@ function run(command, args, options = {}) {
   execFileSync(command, args, { stdio: "inherit", ...options });
 }
 
+function runBestEffort(command, args, options = {}) {
+  try {
+    run(command, args, options);
+  } catch {
+    // Diagnostics should not replace the original installation error.
+  }
+}
+
 function requireRoot() {
   if (typeof process.getuid === "function" && process.getuid() !== 0) {
     throw new Error("Run this command as root: sudo npm run install-service");
@@ -66,12 +74,31 @@ async function installFiles() {
   );
   await writeFile(serviceTarget, service, "utf8");
 
+}
+
+function installProductionDependencies() {
+  const args = ["install", "--omit=dev", "--no-audit", "--no-fund"];
+  const npmExecPath = process.env.npm_execpath;
+
+  if (npmExecPath) {
+    run(process.execPath, [npmExecPath, ...args], { cwd: installDir });
+  } else {
+    run("npm", args, { cwd: installDir });
+  }
+
   run("chown", ["-R", "ai-relay:ai-relay", installDir]);
 }
 
 async function readPort() {
   const config = JSON.parse(await readFile(resolve(repoRoot, "config/relay.json"), "utf8"));
   return Number(config?.server?.port ?? 8787);
+}
+
+function printServiceDiagnostics() {
+  console.error("\nAI Relay failed its health check. Service diagnostics:");
+  runBestEffort("systemctl", ["status", "ai-relay", "--no-pager", "-l"]);
+  console.error("\nRecent AI Relay logs:");
+  runBestEffort("journalctl", ["-u", "ai-relay", "-n", "50", "--no-pager"]);
 }
 
 async function verifyHealth() {
@@ -97,11 +124,17 @@ async function main() {
   run("systemctl", ["--version"], { stdio: "ignore" });
   ensureServiceUser();
   await installFiles();
+  installProductionDependencies();
 
   run("systemctl", ["daemon-reload"]);
   run("systemctl", ["enable", "ai-relay"]);
   run("systemctl", ["restart", "ai-relay"]);
-  await verifyHealth();
+  try {
+    await verifyHealth();
+  } catch (error) {
+    printServiceDiagnostics();
+    throw error;
+  }
 
   const port = await readPort();
   console.log(`AI Relay is installed and running at http://127.0.0.1:${port}`);

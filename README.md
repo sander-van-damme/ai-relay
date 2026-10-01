@@ -11,16 +11,17 @@ Requirements:
 - Linux with systemd
 - Node.js 24.12+
 
-Install dependencies, add your provider keys, and install the service:
+Add your provider keys and install the service:
 
 ```bash
-npm install
 cp .env.example .env
 # Edit .env and configure the providers you want to use.
 sudo npm run install-service
 ```
 
-`install-service` creates the `ai-relay` system user when needed, copies the application to `/opt/ai-relay`, installs/enables the systemd unit, copies `.env` to `/etc/ai-relay.env`, restarts the service, and checks `/health`.
+The service installer installs the production dependencies it needs under `/opt/ai-relay`; a preliminary `npm install` in the repository is not required for production installation.
+
+`install-service` creates the `ai-relay` system user when needed, copies the application to `/opt/ai-relay`, installs its production npm dependencies there, installs/enables the systemd unit, copies `.env` to `/etc/ai-relay.env`, restarts the service, and checks `/health`. A separate manual `npm install` in `/opt/ai-relay` is not required.
 
 On later updates:
 
