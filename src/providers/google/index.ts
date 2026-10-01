@@ -1,6 +1,8 @@
 import { GoogleGenAI, type Content } from "@google/genai";
+import { log } from "../../log.ts";
 import type { ChatCompletionRequest } from "../../types.ts";
 import {
+  calendarDayBounds,
   effectiveInputCapacity,
   emptyQuotaState,
   parseRetryAfterMs,
@@ -33,7 +35,6 @@ import {
 const GOOGLE_DAY = { type: "calendar-day", timeZone: "America/Los_Angeles" } as const;
 const DEFAULT_RETRY_MS = 5_000;
 const PROVIDER_FAILURE_COOLDOWN_MS = 15_000;
-const OVERFLOW_HARD_CAP_TTL_MS = 24 * 60 * 60 * 1000;
 const CONTINUATION_TTL_MS = 60 * 60 * 1000;
 const MAX_CONTINUATIONS = 1_000;
 const OVERFLOW_LIMITS = new Set<QuotaLimitName>(["requestsPerDay"]);
@@ -577,6 +578,18 @@ export class GoogleProvider implements Provider {
     return pending;
   }
 
+  private pruneOverflowBlocks(now = Date.now()): void {
+    for (const [modelId, blockedUntil] of this.modelOverflowBlockedUntil) {
+      if (blockedUntil > now) continue;
+      this.modelOverflowBlockedUntil.delete(modelId);
+      log("info", "overflow_boundary_expired", {
+        provider: this.id,
+        relay_model: modelId,
+        reset_at: new Date(blockedUntil).toISOString(),
+      });
+    }
+  }
+
   private async candidate(model: GoogleModel, index: number, request: OfferRequest, now: number): Promise<Candidate | null> {
     if (request.excludedModelIds.has(model.id)) return null;
     if (request.requestedModel !== "auto" && request.requestedModel !== model.id) return null;
@@ -586,6 +599,7 @@ export class GoogleProvider implements Provider {
     if (!quotaCanEverHandle(model.quota, inputTokens, model.contextWindowTokens)) return null;
 
     const evaluatedAt = Math.max(now, Date.now());
+    this.pruneOverflowBlocks(evaluatedAt);
     const state = this.modelState(model.id);
     const modelDelayMs = quotaDelayMs(model.quota, state, inputTokens, evaluatedAt);
     const providerBlockedMs = Math.max(0, this.providerState.blockedUntil - evaluatedAt);
@@ -682,7 +696,7 @@ export class GoogleProvider implements Provider {
     releaseQuota(this.modelState(model.id));
   }
 
-  private blockModel(model: GoogleModel, requestedDelayMs: number, now: number): number {
+  private blockModel(model: GoogleModel, requestedDelayMs: number, now: number, reason: string): number {
     const failures = (this.modelFailureCounts.get(model.id) ?? 0) + 1;
     this.modelFailureCounts.set(model.id, failures);
     const multiplier = 2 ** Math.min(failures - 1, 4);
@@ -690,15 +704,28 @@ export class GoogleProvider implements Provider {
     const retryAt = now + delayMs;
     const state = this.modelState(model.id);
     state.blockedUntil = Math.max(state.blockedUntil, retryAt);
+    log("warn", "provider_model_cooldown", {
+      provider: this.id,
+      relay_model: model.id,
+      reason,
+      consecutive_failures: failures,
+      blocked_until: new Date(state.blockedUntil).toISOString(),
+    });
     return retryAt;
   }
 
-  private blockProvider(requestedDelayMs: number, now: number): number {
+  private blockProvider(requestedDelayMs: number, now: number, reason: string): number {
     this.providerFailureCount += 1;
     const multiplier = 2 ** Math.min(this.providerFailureCount - 1, 4);
     const delayMs = Math.min(120_000, Math.max(PROVIDER_FAILURE_COOLDOWN_MS, requestedDelayMs) * multiplier);
     const retryAt = now + delayMs;
     this.providerState.blockedUntil = Math.max(this.providerState.blockedUntil, retryAt);
+    log("warn", "provider_cooldown", {
+      provider: this.id,
+      reason,
+      consecutive_failures: this.providerFailureCount,
+      blocked_until: new Date(this.providerState.blockedUntil).toISOString(),
+    });
     return retryAt;
   }
 
@@ -1083,24 +1110,30 @@ export class GoogleProvider implements Provider {
     if (code === 429) {
       const dailyOverflowConfirmed = offer.kind === "overflow" && confirmsDailyQuota(error);
       if (dailyOverflowConfirmed) {
-        this.modelOverflowBlockedUntil.set(
-          model.id,
-          Math.max(this.modelOverflowBlockedUntil.get(model.id) ?? 0, failedAt + OVERFLOW_HARD_CAP_TTL_MS),
-        );
+        const resetAt = calendarDayBounds(failedAt, GOOGLE_DAY.timeZone).end;
+        this.modelOverflowBlockedUntil.set(model.id, resetAt);
+        log("warn", "overflow_boundary_confirmed", {
+          provider: this.id,
+          relay_model: model.id,
+          limit: "requests_per_day",
+          reset_at: new Date(resetAt).toISOString(),
+        });
       }
+      const reason = dailyOverflowConfirmed ? "overflow_limit_confirmed" : "rate_limit";
       return {
         status: "retryable",
         scope: "model",
-        reason: dailyOverflowConfirmed ? "overflow_limit_confirmed" : "rate_limit",
-        retryAt: this.blockModel(model, retryAfterMs, failedAt),
+        reason,
+        retryAt: this.blockModel(model, retryAfterMs, failedAt, reason),
       };
     }
     if (code === 408 || (code !== undefined && code >= 500)) {
+      const reason = `upstream_${code}`;
       return {
         status: "retryable",
         scope: "provider",
-        reason: `upstream_${code}`,
-        retryAt: this.blockProvider(retryAfterMs, failedAt),
+        reason,
+        retryAt: this.blockProvider(retryAfterMs, failedAt, reason),
       };
     }
     if (code === 401 || code === 403) {
@@ -1111,11 +1144,12 @@ export class GoogleProvider implements Provider {
       return { status: "rejected", scope: "model", httpStatus: code, bodyText };
     }
 
+    const reason = error instanceof Error ? `network:${error.message}` : "network_error";
     return {
       status: "retryable",
       scope: "provider",
-      reason: error instanceof Error ? `network:${error.message}` : "network_error",
-      retryAt: this.blockProvider(DEFAULT_RETRY_MS, failedAt),
+      reason,
+      retryAt: this.blockProvider(DEFAULT_RETRY_MS, failedAt, reason),
     };
   }
 
@@ -1203,8 +1237,18 @@ export class GoogleProvider implements Provider {
         }
       }
 
+      const providerFailures = this.providerFailureCount;
+      const modelFailures = this.modelFailureCounts.get(model.id) ?? 0;
       this.providerFailureCount = 0;
       this.modelFailureCounts.set(model.id, 0);
+      if (providerFailures > 0 || modelFailures > 0) {
+        log("info", "provider_recovered", {
+          provider: this.id,
+          relay_model: model.id,
+          provider_failures: providerFailures,
+          model_failures: modelFailures,
+        });
+      }
       let released = false;
       return {
         status: "success",
@@ -1222,6 +1266,7 @@ export class GoogleProvider implements Provider {
   }
 
   status(now = Date.now()): ProviderStatus {
+    this.pruneOverflowBlocks(now);
     return {
       id: this.id,
       configured: this.isConfigured(),
