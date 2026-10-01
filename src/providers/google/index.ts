@@ -26,8 +26,10 @@ import type {
 } from "../shared/types.ts";
 import {
   toGoogleCountInput,
+  toGoogleDeveloperCountTokensRequest,
   toGoogleGenerateContentRequest,
   toGoogleInteractionRequest,
+  type GoogleCountInput,
   type GoogleGenerateContentRequest,
   type GoogleInteractionRequest,
 } from "./token-count.ts";
@@ -447,6 +449,56 @@ function errorBody(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
+type GoogleDeveloperTokenCounter = (
+  apiKey: string,
+  model: string,
+  input: GoogleCountInput,
+) => Promise<number>;
+
+async function countDeveloperApiTokens(
+  apiKey: string,
+  model: string,
+  input: GoogleCountInput,
+): Promise<number> {
+  const response = await fetch(
+    `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:countTokens`,
+    {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-goog-api-key": apiKey,
+      },
+      body: JSON.stringify(toGoogleDeveloperCountTokensRequest(input, model)),
+      signal: AbortSignal.timeout(10_000),
+    },
+  );
+
+  const bodyText = await response.text();
+  if (!response.ok) {
+    const error = Object.assign(
+      new Error(`Google countTokens returned HTTP ${response.status}: ${bodyText || response.statusText}`),
+      {
+        statusCode: response.status,
+        headers: response.headers,
+        body: bodyText,
+      },
+    );
+    throw error;
+  }
+
+  let payload: unknown;
+  try {
+    payload = JSON.parse(bodyText) as unknown;
+  } catch {
+    throw new Error("Google countTokens returned invalid JSON.");
+  }
+  const value = object(payload);
+  if (!Number.isSafeInteger(value?.totalTokens) || Number(value?.totalTokens) < 0) {
+    throw new Error(`Google did not return a valid token count for ${model}.`);
+  }
+  return Number(value!.totalTokens);
+}
+
 function confirmsDailyQuota(error: unknown): boolean {
   const value = object(error);
   const code = typeof value?.code === "string" ? value.code : "";
@@ -474,13 +526,16 @@ export class GoogleProvider implements Provider {
   private client?: GoogleGenAI;
   private clientApiKey?: string;
   private readonly clientFactory: (apiKey: string) => GoogleGenAI;
+  private readonly developerTokenCounter: GoogleDeveloperTokenCounter;
 
   constructor(
     clientFactory: (apiKey: string) => GoogleGenAI = (apiKey) => new GoogleGenAI({ apiKey }),
     models: readonly GoogleModel[] = GOOGLE_MODELS,
+    developerTokenCounter: GoogleDeveloperTokenCounter = countDeveloperApiTokens,
   ) {
     this.clientFactory = clientFactory;
     this.models = models;
+    this.developerTokenCounter = developerTokenCounter;
     for (const model of this.models) this.modelStates.set(model.id, emptyQuotaState());
   }
 
@@ -496,9 +551,14 @@ export class GoogleProvider implements Provider {
     }));
   }
 
-  private googleClient(): GoogleGenAI {
+  private googleApiKey(): string {
     const apiKey = process.env.GEMINI_API_KEY?.trim();
     if (!apiKey) throw new Error("GEMINI_API_KEY is not configured.");
+    return apiKey;
+  }
+
+  private googleClient(): GoogleGenAI {
+    const apiKey = this.googleApiKey();
     if (!this.client || this.clientApiKey !== apiKey) {
       this.client = this.clientFactory(apiKey);
       this.clientApiKey = apiKey;
@@ -557,13 +617,17 @@ export class GoogleProvider implements Provider {
         );
         contents = request.contents;
       }
+      if (input.config !== undefined) {
+        return this.developerTokenCounter(this.googleApiKey(), model.upstreamModel, {
+          contents,
+          config: input.config,
+        });
+      }
+
       const response = await this.googleClient().models.countTokens({
         model: model.upstreamModel,
         contents,
-        config: {
-          ...input.config,
-          abortSignal: AbortSignal.timeout(10_000),
-        },
+        config: { abortSignal: AbortSignal.timeout(10_000) },
       });
       if (!Number.isSafeInteger(response.totalTokens) || (response.totalTokens ?? -1) < 0) {
         throw new Error(`Google did not return a valid token count for ${model.upstreamModel}.`);
