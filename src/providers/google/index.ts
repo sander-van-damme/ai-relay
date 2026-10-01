@@ -175,6 +175,115 @@ function assistantMessageFromInteraction(interaction: unknown): JsonObject {
   return message;
 }
 
+interface GenerateAssistant {
+  assistant: JsonObject;
+  modelContent?: Content;
+  hasToolCalls: boolean;
+}
+
+function generateAssistant(response: unknown): GenerateAssistant {
+  const value = object(response) ?? {};
+  const candidates = Array.isArray(value.candidates) ? value.candidates : [];
+  const firstCandidate = object(candidates[0]);
+  const rawContent = object(firstCandidate?.content);
+  const rawParts = Array.isArray(rawContent?.parts) ? rawContent.parts : [];
+  const parts: JsonObject[] = [];
+  let text = "";
+  const toolCalls: JsonObject[] = [];
+
+  for (const [index, rawPart] of rawParts.entries()) {
+    const part = object(rawPart);
+    if (!part) continue;
+    const cloned: JsonObject = { ...part };
+    if (typeof part.text === "string" && part.thought !== true) text += part.text;
+
+    const functionCall = object(part.functionCall);
+    if (functionCall && typeof functionCall.name === "string") {
+      const id = typeof functionCall.id === "string" && functionCall.id
+        ? functionCall.id
+        : `call_google_${index}`;
+      const normalizedCall = { ...functionCall, id };
+      cloned.functionCall = normalizedCall;
+      toolCalls.push({
+        id,
+        type: "function",
+        function: {
+          name: functionCall.name,
+          arguments: JSON.stringify(object(functionCall.args) ?? {}),
+        },
+      });
+    }
+    parts.push(cloned);
+  }
+
+  const assistant: JsonObject = {
+    role: "assistant",
+    content: text || (toolCalls.length > 0 ? null : ""),
+  };
+  if (toolCalls.length > 0) assistant.tool_calls = toolCalls;
+
+  return {
+    assistant,
+    modelContent: rawContent
+      ? { role: typeof rawContent.role === "string" ? rawContent.role : "model", parts: parts as any[] }
+      : undefined,
+    hasToolCalls: toolCalls.length > 0,
+  };
+}
+
+function generateUsagePayload(rawUsage: unknown, fallbackInputTokens: number): JsonObject {
+  const usage = object(rawUsage);
+  const promptTokens = typeof usage?.promptTokenCount === "number" ? usage.promptTokenCount : fallbackInputTokens;
+  const completionTokens = typeof usage?.candidatesTokenCount === "number" ? usage.candidatesTokenCount : 0;
+  const totalTokens = typeof usage?.totalTokenCount === "number" ? usage.totalTokenCount : promptTokens + completionTokens;
+  return {
+    prompt_tokens: promptTokens,
+    completion_tokens: completionTokens,
+    total_tokens: totalTokens,
+  };
+}
+
+function generateFinishReason(response: unknown, hasToolCalls: boolean): string {
+  if (hasToolCalls) return "tool_calls";
+  const value = object(response);
+  const candidates = Array.isArray(value?.candidates) ? value.candidates : [];
+  const reason = object(candidates[0])?.finishReason;
+  if (reason === "MAX_TOKENS") return "length";
+  if (
+    reason === "SAFETY"
+    || reason === "BLOCKLIST"
+    || reason === "PROHIBITED_CONTENT"
+    || reason === "SPII"
+    || reason === "IMAGE_SAFETY"
+    || reason === "IMAGE_PROHIBITED_CONTENT"
+  ) return "content_filter";
+  return "stop";
+}
+
+export function googleGenerateContentToOpenAI(
+  response: unknown,
+  relayModelId: string,
+  inputTokens: number,
+): JsonObject {
+  const value = object(response) ?? {};
+  const generated = generateAssistant(value);
+  const createdMs = typeof value.createTime === "string" ? Date.parse(value.createTime) : Number.NaN;
+  const responseId = typeof value.responseId === "string" && value.responseId ? value.responseId : "google";
+  return {
+    id: `chatcmpl-${responseId}`,
+    object: "chat.completion",
+    created: Number.isFinite(createdMs) ? Math.floor(createdMs / 1000) : Math.floor(Date.now() / 1000),
+    model: relayModelId,
+    choices: [{
+      index: 0,
+      message: generated.assistant,
+      finish_reason: generateFinishReason(value, generated.hasToolCalls),
+      logprobs: null,
+    }],
+    usage: generateUsagePayload(value.usageMetadata, inputTokens),
+  };
+}
+
 function usagePayload(rawUsage: unknown, fallbackInputTokens: number): JsonObject {
   const usage = object(rawUsage);
   const promptTokens = typeof usage?.total_input_tokens === "number" ? usage.total_input_tokens : fallbackInputTokens;
