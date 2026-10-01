@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { toGoogleCountInput } from "../src/providers/google/token-count.ts";
+import {
+  toGoogleCountInput,
+  toGoogleInteractionRequest,
+} from "../src/providers/google/token-count.ts";
 
 test("Google token counting maps OpenAI chat messages and tools to native contents", () => {
   const input = toGoogleCountInput({
@@ -64,6 +67,97 @@ test("Google token counting maps OpenAI chat messages and tools to native conten
       role: "user",
       parts: [{ functionResponse: { name: "weather", response: { temperature: 18 } } }],
     },
+  ]);
+});
+
+test("Google Interactions maps chat options without the OpenAI-compatible transport", () => {
+  const request = toGoogleInteractionRequest({
+    messages: [
+      { role: "developer", content: "Return structured weather data." },
+      { role: "user", content: "Weather in Ghent" },
+    ],
+    temperature: 0.2,
+    top_p: 0.8,
+    max_completion_tokens: 200,
+    stop: ["END"],
+    reasoning_effort: "high",
+    tool_choice: {
+      type: "function",
+      function: { name: "weather" },
+    },
+    tools: [
+      {
+        type: "function",
+        function: {
+          name: "weather",
+          description: "Get weather",
+          parameters: { type: "object", properties: { city: { type: "string" } } },
+        },
+      },
+    ],
+    response_format: {
+      type: "json_schema",
+      json_schema: {
+        name: "weather_response",
+        strict: true,
+        schema: {
+          type: "object",
+          properties: { temperature: { type: "number" } },
+          required: ["temperature"],
+        },
+      },
+    },
+  }, "gemini-3.8-flash", false);
+
+  assert.equal(request.model, "gemini-3.8-flash");
+  assert.equal(request.stream, false);
+  assert.equal(request.store, true);
+  assert.equal(request.system_instruction, "Return structured weather data.");
+  assert.deepEqual(request.input, [
+    { type: "user_input", content: [{ type: "text", text: "Weather in Ghent" }] },
+  ]);
+  assert.deepEqual(request.tools, [
+    {
+      type: "function",
+      name: "weather",
+      description: "Get weather",
+      parameters: { type: "object", properties: { city: { type: "string" } } },
+    },
+  ]);
+  assert.deepEqual(request.generation_config, {
+    max_output_tokens: 200,
+    stop_sequences: ["END"],
+    temperature: 0.2,
+    thinking_level: "high",
+    tool_choice: { allowed_tools: { mode: "any", tools: ["weather"] } },
+    top_p: 0.8,
+  });
+  assert.deepEqual(request.response_format, {
+    type: "text",
+    mime_type: "application/json",
+    schema: {
+      type: "object",
+      properties: { temperature: { type: "number" } },
+      required: ["temperature"],
+    },
+  });
+});
+
+test("Google continuation sends only messages after the stored interaction", () => {
+  const request = toGoogleInteractionRequest({
+    messages: [
+      { role: "user", content: "First" },
+      { role: "assistant", content: "First answer" },
+      { role: "user", content: "Second" },
+    ],
+  }, "gemini-3.8-flash", false, {
+    previousInteractionId: "interaction-1",
+    inputStartIndex: 2,
+  });
+
+  assert.equal(request.previous_interaction_id, "interaction-1");
+  assert.deepEqual(request.input, [
+    { type: "user_input", content: [{ type: "text", text: "Second" }] },
   ]);
 });
 
