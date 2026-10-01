@@ -1,7 +1,10 @@
 import {
+  FunctionCallingConfigMode,
+  ThinkingLevel,
   type Content,
   type CountTokensConfig,
   type FunctionDeclaration,
+  type GenerateContentConfig,
   type Part,
   type Tool,
 } from "@google/genai";
@@ -19,6 +22,12 @@ export type GoogleInteractionStep =
   | { type: "model_output"; content: Array<{ type: "text"; text: string }> }
   | { type: "function_call"; id: string; name: string; arguments: JsonObject }
   | { type: "function_result"; call_id: string; name?: string; result: string };
+
+export interface GoogleGenerateContentRequest {
+  model: string;
+  contents: Content[];
+  config?: GenerateContentConfig;
+}
 
 export interface GoogleInteractionRequest {
   model: string;
@@ -182,9 +191,6 @@ function generationConfig(body: ChatCompletionRequest): GoogleInteractionRequest
   const maxOutputTokens = maxCompletionTokens ?? maxTokens;
   if (maxOutputTokens !== undefined) config.max_output_tokens = maxOutputTokens;
 
-  if (body.temperature !== undefined || body.top_p !== undefined) {
-    throw new Error("temperature and top_p are not supported by the pinned Google Interactions SDK.");
-  }
   const seed = integerField(body, "seed");
   if (seed !== undefined) config.seed = seed;
 
@@ -362,12 +368,95 @@ export function toGoogleCountInput(body: ChatCompletionRequest): GoogleCountInpu
   return normalize(body).countInput;
 }
 
+function contentIndexBeforeMessage(body: ChatCompletionRequest, messageIndex: number): number {
+  if (!Array.isArray(body.messages)) return 0;
+  let index = 0;
+  for (const rawMessage of body.messages.slice(0, messageIndex)) {
+    const message = object(rawMessage);
+    if (message?.role !== "system" && message?.role !== "developer") index += 1;
+  }
+  return index;
+}
+
+function generateContentToolConfig(body: ChatCompletionRequest): GenerateContentConfig["toolConfig"] {
+  if (body.tool_choice === undefined) return undefined;
+  const choice = body.tool_choice;
+  if (choice === "auto") return { functionCallingConfig: { mode: FunctionCallingConfigMode.AUTO } };
+  if (choice === "none") return { functionCallingConfig: { mode: FunctionCallingConfigMode.NONE } };
+  if (choice === "required") return { functionCallingConfig: { mode: FunctionCallingConfigMode.ANY } };
+
+  const choiceObject = object(choice);
+  const fn = choiceObject?.type === "function" ? object(choiceObject.function) : null;
+  if (!fn || typeof fn.name !== "string" || !fn.name) throw new Error("Unsupported tool_choice for Google models.");
+  return {
+    functionCallingConfig: {
+      mode: FunctionCallingConfigMode.ANY,
+      allowedFunctionNames: [fn.name],
+    },
+  };
+}
+
+export function toGoogleGenerateContentRequest(
+  body: ChatCompletionRequest,
+  model: string,
+  continuation?: { contents: Content[]; inputStartIndex: number },
+): GoogleGenerateContentRequest {
+  const normalized = normalize(body);
+  const interactionConfig = normalized.interaction.generation_config;
+  const config: GenerateContentConfig = {};
+  const countConfig = normalized.countInput.config;
+  if (countConfig?.systemInstruction !== undefined) config.systemInstruction = countConfig.systemInstruction;
+  if (countConfig?.tools !== undefined) config.tools = countConfig.tools;
+
+  if (interactionConfig?.max_output_tokens !== undefined) config.maxOutputTokens = interactionConfig.max_output_tokens;
+  if (interactionConfig?.seed !== undefined) config.seed = interactionConfig.seed;
+  if (interactionConfig?.stop_sequences !== undefined) config.stopSequences = interactionConfig.stop_sequences;
+  if (interactionConfig?.thinking_level !== undefined) {
+    const levels = {
+      minimal: ThinkingLevel.MINIMAL,
+      low: ThinkingLevel.LOW,
+      medium: ThinkingLevel.MEDIUM,
+      high: ThinkingLevel.HIGH,
+    } as const;
+    config.thinkingConfig = { thinkingLevel: levels[interactionConfig.thinking_level] };
+  }
+
+  const temperature = numberField(body, "temperature");
+  if (temperature !== undefined) config.temperature = temperature;
+  const topP = numberField(body, "top_p");
+  if (topP !== undefined) config.topP = topP;
+
+  const mappedToolConfig = generateContentToolConfig(body);
+  if (mappedToolConfig) config.toolConfig = mappedToolConfig;
+
+  const responseFormat = normalized.interaction.response_format;
+  if (responseFormat) {
+    config.responseMimeType = responseFormat.mime_type;
+    if (responseFormat.schema) config.responseJsonSchema = responseFormat.schema;
+  }
+
+  const contentStartIndex = continuation
+    ? contentIndexBeforeMessage(body, continuation.inputStartIndex)
+    : 0;
+  const newContents = normalized.countInput.contents.slice(contentStartIndex);
+  const contents = continuation ? [...continuation.contents, ...newContents] : newContents;
+
+  return {
+    model,
+    contents,
+    ...(Object.keys(config).length > 0 ? { config } : {}),
+  };
+}
+
 export function toGoogleInteractionRequest(
   body: ChatCompletionRequest,
   model: string,
   stream: boolean,
   continuation?: { previousInteractionId: string; inputStartIndex: number },
 ): GoogleInteractionRequest {
+  if (body.temperature !== undefined || body.top_p !== undefined) {
+    throw new Error("temperature and top_p are not supported by the pinned Google Interactions SDK.");
+  }
   const normalized = normalize(body, continuation?.inputStartIndex ?? 0);
   return {
     ...normalized.interaction,
