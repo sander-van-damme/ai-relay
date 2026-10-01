@@ -533,6 +533,10 @@ export class GoogleProvider implements Provider {
           systemInstruction: {
             parts: [{ text: ANTIGRAVITY_SYSTEM_INSTRUCTION }, ...existingParts as any[]],
           },
+          tools: [
+            ...(input.config?.tools ?? []),
+            { googleSearch: {} },
+          ],
         };
       }
       let contents = input.contents;
