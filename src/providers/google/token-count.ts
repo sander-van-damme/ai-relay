@@ -95,6 +95,90 @@ function textContent(value: unknown): string {
   return text;
 }
 
+export const GOOGLE_EXTERNAL_TOOL_THOUGHT_SIGNATURE = "skip_thought_signature_validator";
+
+export function hasGoogleToolHistory(body: ChatCompletionRequest): boolean {
+  if (!Array.isArray(body.messages)) return false;
+  return body.messages.some((rawMessage) => {
+    const message = object(rawMessage);
+    return message?.role === "tool"
+      || (message?.role === "assistant" && Array.isArray(message.tool_calls) && message.tool_calls.length > 0);
+  });
+}
+
+export function hasAssistantToolCallsFrom(body: ChatCompletionRequest, startIndex: number): boolean {
+  if (!Array.isArray(body.messages)) return false;
+  return body.messages.slice(startIndex).some((rawMessage) => {
+    const message = object(rawMessage);
+    return message?.role === "assistant" && Array.isArray(message.tool_calls) && message.tool_calls.length > 0;
+  });
+}
+
+function antigravityTranscript(body: ChatCompletionRequest): string {
+  if (!Array.isArray(body.messages)) throw new Error("messages must be an array.");
+  const lines = [
+    "The following is historical conversation context from an OpenAI-compatible client.",
+    "Historical tool calls and tool results shown here have already occurred; treat them as context, not as pending function calls.",
+    "Continue from the final request using the currently supplied tools when appropriate.",
+    "",
+  ];
+
+  for (const rawMessage of body.messages) {
+    const message = object(rawMessage);
+    if (!message || typeof message.role !== "string") throw new Error("Invalid chat message.");
+    if (message.role === "system" || message.role === "developer") continue;
+
+    if (message.role === "user") {
+      lines.push("USER:", textContent(message.content), "");
+      continue;
+    }
+    if (message.role === "assistant") {
+      const text = textContent(message.content);
+      if (text) lines.push("ASSISTANT:", text);
+      if (message.tool_calls !== undefined) {
+        if (!Array.isArray(message.tool_calls)) throw new Error("assistant.tool_calls must be an array.");
+        for (const rawCall of message.tool_calls) {
+          const call = object(rawCall);
+          const fn = call ? object(call.function) : null;
+          if (!call || call.type !== "function" || typeof call.id !== "string" || !fn || typeof fn.name !== "string") {
+            throw new Error("Only OpenAI function tool calls with ids are supported by the Google relay provider.");
+          }
+          const args = typeof fn.arguments === "string" ? fn.arguments : JSON.stringify(fn.arguments ?? {});
+          lines.push(`ASSISTANT TOOL CALL [${call.id}] ${fn.name}:`, args, "");
+        }
+      } else if (!text) {
+        lines.push("ASSISTANT:", "", "");
+      } else {
+        lines.push("");
+      }
+      continue;
+    }
+    if (message.role === "tool") {
+      if (typeof message.tool_call_id !== "string") throw new Error("Tool message is missing tool_call_id.");
+      lines.push(`TOOL RESULT [${message.tool_call_id}]:`, textContent(message.content), "");
+      continue;
+    }
+    throw new Error(`Unsupported OpenAI message role for Google: ${message.role}`);
+  }
+
+  return lines.join("\n").trim();
+}
+
+export function toAntigravityBootstrapBody(body: ChatCompletionRequest): ChatCompletionRequest {
+  if (!Array.isArray(body.messages)) throw new Error("messages must be an array.");
+  const instructions = body.messages.filter((rawMessage) => {
+    const message = object(rawMessage);
+    return message?.role === "system" || message?.role === "developer";
+  });
+  return {
+    ...body,
+    messages: [
+      ...instructions,
+      { role: "user", content: antigravityTranscript(body) },
+    ],
+  };
+}
+
 function parseJsonObject(value: string, label: string): JsonObject {
   let parsed: unknown;
   try {
@@ -427,10 +511,29 @@ function generateContentToolConfig(body: ChatCompletionRequest): GenerateContent
   };
 }
 
+function replaySafeExternalToolContents(contents: Content[]): Content[] {
+  return contents.map((content) => {
+    if (content.role !== "model" || !Array.isArray(content.parts)) return content;
+    let signedFunctionCall = false;
+    const parts = content.parts.map((rawPart) => {
+      const part = object(rawPart);
+      if (!part || !object(part.functionCall) || signedFunctionCall) return rawPart;
+      signedFunctionCall = true;
+      if (part.thoughtSignature !== undefined) return rawPart;
+      return {
+        ...part,
+        thoughtSignature: GOOGLE_EXTERNAL_TOOL_THOUGHT_SIGNATURE,
+      } as Part;
+    });
+    return { ...content, parts };
+  });
+}
+
 export function toGoogleGenerateContentRequest(
   body: ChatCompletionRequest,
   model: string,
   continuation?: { contents: Content[]; inputStartIndex: number },
+  replayExternalToolHistory = false,
 ): GoogleGenerateContentRequest {
   const normalized = normalize(body);
   const interactionConfig = normalized.interaction.generation_config;
@@ -470,7 +573,10 @@ export function toGoogleGenerateContentRequest(
     ? contentIndexBeforeMessage(body, continuation.inputStartIndex)
     : 0;
   const newContents = normalized.countInput.contents.slice(contentStartIndex);
-  const contents = continuation ? [...continuation.contents, ...newContents] : newContents;
+  const recoveredContents = replayExternalToolHistory
+    ? replaySafeExternalToolContents(newContents)
+    : newContents;
+  const contents = continuation ? [...continuation.contents, ...recoveredContents] : recoveredContents;
 
   return {
     model,
