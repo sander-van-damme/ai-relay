@@ -76,8 +76,6 @@ test("Google Interactions maps chat options without the OpenAI-compatible transp
       { role: "developer", content: "Return structured weather data." },
       { role: "user", content: "Weather in Ghent" },
     ],
-    temperature: 0.2,
-    top_p: 0.8,
     max_completion_tokens: 200,
     stop: ["END"],
     reasoning_effort: "high",
@@ -127,10 +125,8 @@ test("Google Interactions maps chat options without the OpenAI-compatible transp
   assert.deepEqual(request.generation_config, {
     max_output_tokens: 200,
     stop_sequences: ["END"],
-    temperature: 0.2,
     thinking_level: "high",
     tool_choice: { allowed_tools: { mode: "any", tools: ["weather"] } },
-    top_p: 0.8,
   });
   assert.deepEqual(request.response_format, {
     type: "text",
@@ -141,6 +137,16 @@ test("Google Interactions maps chat options without the OpenAI-compatible transp
       required: ["temperature"],
     },
   });
+});
+
+test("Google rejects sampling options absent from pinned Interactions v2.24", () => {
+  assert.throws(
+    () => toGoogleInteractionRequest({
+      messages: [{ role: "user", content: "Hello" }],
+      temperature: 0.2,
+    }, "gemini-3.8-flash", false),
+    /temperature and top_p are not supported/i,
+  );
 });
 
 test("Google continuation sends only messages after the stored interaction", () => {
