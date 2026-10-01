@@ -295,7 +295,7 @@ function normalize(body: ChatCompletionRequest, inputStartIndex = 0): Normalized
             : object(fn.arguments);
           if (!args) throw new Error(`Arguments for tool ${fn.name} must be a JSON object.`);
           toolCallNames.set(call.id, fn.name);
-          parts.push({ functionCall: { name: fn.name, args } });
+          parts.push({ functionCall: { id: call.id, name: fn.name, args } });
           if (messageIndex >= inputStartIndex) {
             steps.push({ type: "function_call", id: call.id, name: fn.name, arguments: args });
           }
@@ -317,7 +317,7 @@ function normalize(body: ChatCompletionRequest, inputStartIndex = 0): Normalized
       } catch {
         response = { result };
       }
-      contents.push({ role: "user", parts: [{ functionResponse: { name, response } }] });
+      contents.push({ role: "user", parts: [{ functionResponse: { id: message.tool_call_id, name, response } }] });
       if (messageIndex >= inputStartIndex) {
         steps.push({ type: "function_result", call_id: message.tool_call_id, name, result });
       }
