@@ -52,7 +52,7 @@ For `"model": "auto"`, each provider counts the request with the concrete candid
 kind + provider + model + exact input tokens + effective input capacity + available-at time
 ```
 
-Token counting is asynchronous at the provider boundary so a provider can use either a fast local tokenizer or an official counting API. The selected offer carries the authoritative input token count, and execution reuses that same value for quota accounting.
+Token counting stays inside provider offer evaluation and may be asynchronous, so a provider can use either a fast local tokenizer or an official counting API. The relay only sees the resulting offer (or a structured no-offer reason). The selected offer carries the authoritative input token count, and execution reuses that same value for quota accounting.
 
 The scheduler asks for `standard` offers first. Providers may optionally expose an `overflow` offer as a speculative last resort when their own tracked quota says a request should wait.
 
