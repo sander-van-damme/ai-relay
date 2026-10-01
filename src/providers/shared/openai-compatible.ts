@@ -18,6 +18,7 @@ import type {
   ProviderExecutionResult,
   ProviderModelInfo,
   ProviderOffer,
+  ProviderOfferResult,
   ProviderStatus,
 } from "./types.ts";
 
@@ -128,7 +129,7 @@ export class OpenAICompatibleProvider implements Provider {
   }
 
 
-  async countInputTokens(body: ChatCompletionRequest, modelId: string): Promise<number> {
+  private async countInputTokens(body: ChatCompletionRequest, modelId: string): Promise<number> {
     const model = this.modelById(modelId);
     let perModel = this.tokenCountCache.get(body);
     if (!perModel) {
@@ -225,10 +226,21 @@ export class OpenAICompatibleProvider implements Provider {
     };
   }
 
-  async getBestOffer(request: OfferRequest, now = Date.now()): Promise<ProviderOffer | null> {
-    if (!this.isConfigured()) return null;
+  async getBestOffer(request: OfferRequest, now = Date.now()): Promise<ProviderOfferResult> {
+    if (!this.isConfigured()) {
+      return { status: "no_offer", providerId: this.id, reason: "provider_not_configured" };
+    }
 
-    const results = await Promise.all(this.models.map(async (model, index) => {
+    const eligibleModels = this.models
+      .map((model, index) => ({ model, index }))
+      .filter(({ model }) => !request.excludedModelIds.has(model.id))
+      .filter(({ model }) => request.requestedModel === "auto" || request.requestedModel === model.id);
+
+    if (eligibleModels.length === 0) {
+      return { status: "no_offer", providerId: this.id, reason: "no_eligible_model" };
+    }
+
+    const results = await Promise.all(eligibleModels.map(async ({ model, index }) => {
       try {
         return { candidate: await this.candidate(model, index, request, now), error: undefined };
       } catch (error) {
@@ -240,8 +252,19 @@ export class OpenAICompatibleProvider implements Provider {
       .filter((candidate): candidate is Candidate => candidate !== null);
     if (candidates.length === 0) {
       const countingError = results.find((result) => result.error !== undefined)?.error;
-      if (countingError !== undefined) throw countingError;
-      return null;
+      if (countingError !== undefined) {
+        return {
+          status: "no_offer",
+          providerId: this.id,
+          reason: "token_count_failed",
+          detail: countingError instanceof Error ? countingError.message : String(countingError),
+        };
+      }
+      return {
+        status: "no_offer",
+        providerId: this.id,
+        reason: request.offerKind === "standard" ? "request_exceeds_capacity" : "no_eligible_model",
+      };
     }
 
     let chosen: Candidate;
@@ -255,13 +278,16 @@ export class OpenAICompatibleProvider implements Provider {
     }
 
     return {
-      kind: request.offerKind,
-      providerId: this.id,
-      providerPriority: this.priority,
-      modelId: chosen.model.id,
-      inputTokens: chosen.inputTokens,
-      inputCapacityTokens: chosen.inputCapacityTokens,
-      availableAt: chosen.availableAt,
+      status: "offer",
+      offer: {
+        kind: request.offerKind,
+        providerId: this.id,
+        providerPriority: this.priority,
+        modelId: chosen.model.id,
+        inputTokens: chosen.inputTokens,
+        inputCapacityTokens: chosen.inputCapacityTokens,
+        availableAt: chosen.availableAt,
+      },
     };
   }
 
