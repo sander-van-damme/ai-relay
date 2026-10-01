@@ -17,6 +17,16 @@ export interface GoogleCountInput {
   config?: CountTokensConfig;
 }
 
+export interface GoogleDeveloperCountTokensRequest {
+  generateContentRequest: {
+    model: string;
+    contents: Content[];
+    systemInstruction?: CountTokensConfig["systemInstruction"];
+    tools?: CountTokensConfig["tools"];
+    generationConfig?: CountTokensConfig["generationConfig"];
+  };
+}
+
 export type GoogleInteractionStep =
   | { type: "user_input"; content: Array<{ type: "text"; text: string }> }
   | { type: "model_output"; content: Array<{ type: "text"; text: string }> }
@@ -366,6 +376,27 @@ function normalize(body: ChatCompletionRequest, inputStartIndex = 0): Normalized
 
 export function toGoogleCountInput(body: ChatCompletionRequest): GoogleCountInput {
   return normalize(body).countInput;
+}
+
+export function toGoogleDeveloperCountTokensRequest(
+  input: GoogleCountInput,
+  model: string,
+): GoogleDeveloperCountTokensRequest {
+  const resourceModel = model.startsWith("models/") ? model : `models/${model}`;
+  const config = input.config;
+  return {
+    generateContentRequest: {
+      model: resourceModel,
+      contents: input.contents,
+      ...(config?.systemInstruction !== undefined
+        ? { systemInstruction: config.systemInstruction }
+        : {}),
+      ...(config?.tools !== undefined ? { tools: config.tools } : {}),
+      ...(config?.generationConfig !== undefined
+        ? { generationConfig: config.generationConfig }
+        : {}),
+    },
+  };
 }
 
 function contentIndexBeforeMessage(body: ChatCompletionRequest, messageIndex: number): number {

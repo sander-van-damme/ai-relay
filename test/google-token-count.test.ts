@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   toGoogleCountInput,
+  toGoogleDeveloperCountTokensRequest,
   toGoogleGenerateContentRequest,
   toGoogleInteractionRequest,
 } from "../src/providers/google/token-count.ts";
@@ -69,6 +70,50 @@ test("Google token counting maps OpenAI chat messages and tools to native conten
       parts: [{ functionResponse: { id: "call_1", name: "weather", response: { temperature: 18 } } }],
     },
   ]);
+});
+
+test("Google Developer API token counting wraps the full generation request", () => {
+  const input = toGoogleCountInput({
+    messages: [
+      { role: "system", content: "Be concise." },
+      { role: "user", content: "What is the weather?" },
+    ],
+    tools: [{
+      type: "function",
+      function: {
+        name: "weather",
+        description: "Get weather",
+        parameters: {
+          type: "object",
+          properties: { city: { type: "string" } },
+          required: ["city"],
+        },
+      },
+    }],
+    response_format: { type: "json_object" },
+  });
+
+  assert.deepEqual(toGoogleDeveloperCountTokensRequest(input, "gemini-3.8-flash"), {
+    generateContentRequest: {
+      model: "models/gemini-3.8-flash",
+      contents: [{ role: "user", parts: [{ text: "What is the weather?" }] }],
+      systemInstruction: { parts: [{ text: "Be concise." }] },
+      tools: [{
+        functionDeclarations: [{
+          name: "weather",
+          description: "Get weather",
+          parametersJsonSchema: {
+            type: "object",
+            properties: { city: { type: "string" } },
+            required: ["city"],
+          },
+        }],
+      }],
+      generationConfig: {
+        responseMimeType: "application/json",
+      },
+    },
+  });
 });
 
 test("Google Interactions maps chat options without the OpenAI-compatible transport", () => {
