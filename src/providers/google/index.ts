@@ -1,4 +1,4 @@
-import { GoogleGenAI } from "@google/genai";
+import { GoogleGenAI, type Content } from "@google/genai";
 import type { ChatCompletionRequest } from "../../types.ts";
 import {
   effectiveInputCapacity,
@@ -23,7 +23,9 @@ import type {
 } from "../shared/types.ts";
 import {
   toGoogleCountInput,
+  toGoogleGenerateContentRequest,
   toGoogleInteractionRequest,
+  type GoogleGenerateContentRequest,
   type GoogleInteractionRequest,
 } from "./token-count.ts";
 
@@ -35,11 +37,16 @@ const CONTINUATION_TTL_MS = 60 * 60 * 1000;
 const MAX_CONTINUATIONS = 1_000;
 const OVERFLOW_LIMITS = new Set<QuotaLimitName>(["requestsPerDay"]);
 
+export type GoogleTransport = "interactions" | "generate-content";
+export type GoogleThinkingLevel = "minimal" | "low" | "medium" | "high";
+
 export interface GoogleModel {
   id: string;
   upstreamModel: string;
   contextWindowTokens: number;
   quota: QuotaPolicy;
+  transport?: GoogleTransport;
+  thinkingLevels?: readonly GoogleThinkingLevel[];
 }
 
 interface Candidate {
@@ -51,10 +58,11 @@ interface Candidate {
 }
 
 interface Continuation {
-  interactionId: string;
   inputStartIndex: number;
   upstreamModel: string;
   expiresAt: number;
+  interactionId?: string;
+  generateContents?: Content[];
 }
 
 type JsonObject = Record<string, unknown>;
@@ -75,19 +83,22 @@ function quota(rpm: number, tpm: number, rpd: number): QuotaPolicy {
 // Google AI Studio free-tier limits for this relay project, captured 2026-10-01.
 // Only models that accept text and produce text are exposed here, and only when
 // the dashboard reports non-zero RPM, TPM, and RPD quotas.
+const ALL_THINKING: readonly GoogleThinkingLevel[] = ["minimal", "low", "medium", "high"];
+const NO_MINIMAL_THINKING: readonly GoogleThinkingLevel[] = ["low", "medium", "high"];
+
 export const GOOGLE_MODELS: readonly GoogleModel[] = [
-  { id: "google/gemma-4-26b-a4b-it", upstreamModel: "gemma-4-26b-a4b-it", contextWindowTokens: 262_144, quota: quota(30, 16_000, 14_400) },
-  { id: "google/gemma-4-31b-it", upstreamModel: "gemma-4-31b-it", contextWindowTokens: 262_144, quota: quota(30, 16_000, 14_400) },
-  { id: "google/gemini-robotics-er-2-preview", upstreamModel: "gemini-robotics-er-2-preview", contextWindowTokens: 131_072, quota: quota(5, 250_000, 20) },
-  { id: "google/gemini-3.5-flash-lite", upstreamModel: "gemini-3.5-flash-lite", contextWindowTokens: 1_048_576, quota: quota(15, 250_000, 500) },
-  { id: "google/gemini-3.1-flash-lite", upstreamModel: "gemini-3.1-flash-lite", contextWindowTokens: 1_048_576, quota: quota(15, 250_000, 500) },
-  { id: "google/gemini-2.5-flash-lite", upstreamModel: "gemini-2.5-flash-lite", contextWindowTokens: 1_048_576, quota: quota(10, 250_000, 20) },
-  { id: "google/gemini-3.8-flash", upstreamModel: "gemini-3.8-flash", contextWindowTokens: 1_048_576, quota: quota(5, 250_000, 20) },
-  { id: "google/gemini-3.7-flash", upstreamModel: "gemini-3.7-flash", contextWindowTokens: 1_048_576, quota: quota(5, 250_000, 20) },
-  { id: "google/gemini-3.6-flash", upstreamModel: "gemini-3.6-flash", contextWindowTokens: 1_048_576, quota: quota(5, 250_000, 20) },
-  { id: "google/gemini-3.5-flash", upstreamModel: "gemini-3.5-flash", contextWindowTokens: 1_048_576, quota: quota(5, 250_000, 20) },
-  { id: "google/gemini-3-flash-preview", upstreamModel: "gemini-3-flash-preview", contextWindowTokens: 1_048_576, quota: quota(5, 250_000, 20) },
-  { id: "google/gemini-2.5-flash", upstreamModel: "gemini-2.5-flash", contextWindowTokens: 1_048_576, quota: quota(5, 250_000, 20) },
+  { id: "google/gemma-4-26b-a4b-it", upstreamModel: "gemma-4-26b-a4b-it", contextWindowTokens: 262_144, quota: quota(30, 16_000, 14_400), transport: "interactions" },
+  { id: "google/gemma-4-31b-it", upstreamModel: "gemma-4-31b-it", contextWindowTokens: 262_144, quota: quota(30, 16_000, 14_400), transport: "interactions" },
+  { id: "google/gemini-robotics-er-2-preview", upstreamModel: "gemini-robotics-er-2-preview", contextWindowTokens: 131_072, quota: quota(5, 250_000, 20), transport: "generate-content", thinkingLevels: ALL_THINKING },
+  { id: "google/gemini-3.5-flash-lite", upstreamModel: "gemini-3.5-flash-lite", contextWindowTokens: 1_048_576, quota: quota(15, 250_000, 500), transport: "interactions", thinkingLevels: ALL_THINKING },
+  { id: "google/gemini-3.1-flash-lite", upstreamModel: "gemini-3.1-flash-lite", contextWindowTokens: 1_048_576, quota: quota(15, 250_000, 500), transport: "interactions", thinkingLevels: ALL_THINKING },
+  { id: "google/gemini-2.5-flash-lite", upstreamModel: "gemini-2.5-flash-lite", contextWindowTokens: 1_048_576, quota: quota(10, 250_000, 20), transport: "interactions", thinkingLevels: NO_MINIMAL_THINKING },
+  { id: "google/gemini-3.8-flash", upstreamModel: "gemini-3.8-flash", contextWindowTokens: 1_048_576, quota: quota(5, 250_000, 20), transport: "interactions", thinkingLevels: NO_MINIMAL_THINKING },
+  { id: "google/gemini-3.7-flash", upstreamModel: "gemini-3.7-flash", contextWindowTokens: 1_048_576, quota: quota(5, 250_000, 20), transport: "interactions", thinkingLevels: NO_MINIMAL_THINKING },
+  { id: "google/gemini-3.6-flash", upstreamModel: "gemini-3.6-flash", contextWindowTokens: 1_048_576, quota: quota(5, 250_000, 20), transport: "interactions", thinkingLevels: ALL_THINKING },
+  { id: "google/gemini-3.5-flash", upstreamModel: "gemini-3.5-flash", contextWindowTokens: 1_048_576, quota: quota(5, 250_000, 20), transport: "interactions", thinkingLevels: ALL_THINKING },
+  { id: "google/gemini-3-flash-preview", upstreamModel: "gemini-3-flash-preview", contextWindowTokens: 1_048_576, quota: quota(5, 250_000, 20), transport: "interactions", thinkingLevels: ALL_THINKING },
+  { id: "google/gemini-2.5-flash", upstreamModel: "gemini-2.5-flash", contextWindowTokens: 1_048_576, quota: quota(5, 250_000, 20), transport: "interactions", thinkingLevels: NO_MINIMAL_THINKING },
 ];
 
 function object(value: unknown): JsonObject | null {
@@ -114,6 +125,22 @@ function messageArray(body: ChatCompletionRequest): unknown[] | null {
 
 function prefixKey(messages: readonly unknown[]): string {
   return JSON.stringify(messages);
+}
+
+function transportFor(model: GoogleModel): GoogleTransport {
+  return model.transport ?? "interactions";
+}
+
+function modelSupportsRequest(model: GoogleModel, body: ChatCompletionRequest): boolean {
+  const effort = body.reasoning_effort;
+  if (effort !== undefined) {
+    if (effort !== "minimal" && effort !== "low" && effort !== "medium" && effort !== "high") return true;
+    if (!model.thinkingLevels?.includes(effort)) return false;
+  }
+  if (transportFor(model) === "interactions" && (body.temperature !== undefined || body.top_p !== undefined)) {
+    return false;
+  }
+  return true;
 }
 
 function assistantMessageFromInteraction(interaction: unknown): JsonObject {
