@@ -493,10 +493,11 @@ async function countDeveloperApiTokens(
     throw new Error("Google countTokens returned invalid JSON.");
   }
   const value = object(payload);
-  if (!Number.isSafeInteger(value?.totalTokens) || Number(value?.totalTokens) < 0) {
+  const totalTokens = value?.totalTokens;
+  if (typeof totalTokens !== "number" || !Number.isSafeInteger(totalTokens) || totalTokens < 0) {
     throw new Error(`Google did not return a valid token count for ${model}.`);
   }
-  return Number(value!.totalTokens);
+  return totalTokens;
 }
 
 function confirmsDailyQuota(error: unknown): boolean {
