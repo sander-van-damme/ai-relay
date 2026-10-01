@@ -78,13 +78,13 @@ The existing work-conserving queue behavior remains: blocked requests may be byp
 
 ## Google provider
 
-Google is implemented directly on the official `@google/genai` SDK and its Interactions API. The provider does not use Google's OpenAI-compatible Chat Completions endpoint.
+Google is implemented directly on the official `@google/genai` SDK. Models supported by Google's Interactions API use `interactions.create()`; Gemini Robotics ER 2 Preview uses the official `models.generateContent()` / `generateContentStream()` path because it is not currently in the Interactions supported-model list. The provider does not use Google's OpenAI-compatible Chat Completions endpoint.
 
-The checked-in catalog mirrors the non-zero AI Studio quotas supplied for this relay project on 2026-10-01. It includes only endpoints that accept text and produce text: Gemini Flash/Flash-Lite text models, Gemma 4 26B/31B, and Gemini Robotics ER 2 Preview. TTS, Live/audio, image-generation, embedding, video/music, and agent endpoints are intentionally excluded.
+The checked-in catalog mirrors the non-zero AI Studio quotas supplied for this relay project on 2026-10-01. It includes only endpoints that accept text and produce text: Gemini Flash/Flash-Lite text models, Gemma 4 26B/31B, and Gemini Robotics ER 2 Preview. TTS, Live/audio, image-generation, embedding, video/music, and agent endpoints are intentionally excluded. Model-specific request capabilities such as supported thinking levels are also treated as hard routing constraints.
 
 Google quota accounting uses the AI Studio RPM, TPM and RPD limits. RPD resets at midnight in `America/Los_Angeles`. Speculative overflow is enabled only for RPD because the observed project usage can exceed that displayed daily limit. RPM, TPM, context capacity and provider/model health remain hard constraints. If an overflow attempt receives a Google `429`, overflow for that model is suppressed for exactly 24 hours; unrelated network errors and `5xx` responses do not create that observation.
 
-Interactions are stored so follow-up requests can use `previous_interaction_id`, preserving Google-native multi-turn/tool state such as thought signatures. The relay keeps only a bounded one-hour in-memory mapping from an OpenAI-style conversation prefix to the matching Google interaction; continuation is reused only on the same upstream model.
+Interactions are stored so follow-up requests can use `previous_interaction_id`, preserving Google-native multi-turn/tool state. For the Robotics `generateContent` path, the relay instead retains the actual Google `Content` history, including provider-generated metadata such as thought signatures. Both continuation caches are bounded to one hour and reused only on the same upstream model.
 
 ## API
 
