@@ -782,6 +782,149 @@ export class GoogleProvider implements Provider {
     });
   }
 
+  private openAIGenerateStream(
+    stream: AsyncIterable<unknown>,
+    offer: ProviderOffer,
+    body: ChatCompletionRequest,
+    requestContents: Content[],
+    upstreamModel: string,
+  ): Response {
+    const encoder = new TextEncoder();
+    const provider = this;
+    const output = new ReadableStream<Uint8Array>({
+      async start(controller) {
+        let responseId = "google";
+        let created = Math.floor(Date.now() / 1000);
+        let sentRole = false;
+        let fullText = "";
+        let finalFinishReason: unknown;
+        let finalUsage: unknown;
+        const toolCalls: JsonObject[] = [];
+        const toolIndexById = new Map<string, number>();
+        const modelParts: JsonObject[] = [];
+
+        const emit = (delta: JsonObject, finishReasonValue: string | null = null) => {
+          if (!sentRole) {
+            delta = { role: "assistant", ...delta };
+            sentRole = true;
+          }
+          controller.enqueue(encoder.encode(`data: ${JSON.stringify({
+            id: `chatcmpl-${responseId}`,
+            object: "chat.completion.chunk",
+            created,
+            model: offer.modelId,
+            choices: [{ index: 0, delta, finish_reason: finishReasonValue, logprobs: null }],
+          })}\n\n`));
+        };
+
+        try {
+          for await (const rawChunk of stream) {
+            const chunk = object(rawChunk);
+            if (!chunk) continue;
+            if (typeof chunk.responseId === "string" && chunk.responseId) responseId = chunk.responseId;
+            if (typeof chunk.createTime === "string") {
+              const parsed = Date.parse(chunk.createTime);
+              if (Number.isFinite(parsed)) created = Math.floor(parsed / 1000);
+            }
+            if (chunk.usageMetadata !== undefined) finalUsage = chunk.usageMetadata;
+
+            const candidates = Array.isArray(chunk.candidates) ? chunk.candidates : [];
+            const candidate = object(candidates[0]);
+            if (candidate?.finishReason !== undefined) finalFinishReason = candidate.finishReason;
+            const content = object(candidate?.content);
+            const parts = Array.isArray(content?.parts) ? content.parts : [];
+            for (const [partIndex, rawPart] of parts.entries()) {
+              const part = object(rawPart);
+              if (!part) continue;
+              const cloned: JsonObject = { ...part };
+              if (typeof part.text === "string" && part.thought !== true) {
+                fullText += part.text;
+                emit({ content: part.text });
+              }
+
+              const functionCall = object(part.functionCall);
+              if (functionCall && typeof functionCall.name === "string") {
+                const id = typeof functionCall.id === "string" && functionCall.id
+                  ? functionCall.id
+                  : `call_google_${toolCalls.length + partIndex}`;
+                cloned.functionCall = { ...functionCall, id };
+                if (!toolIndexById.has(id)) {
+                  const index = toolCalls.length;
+                  toolIndexById.set(id, index);
+                  const call: JsonObject = {
+                    id,
+                    type: "function",
+                    function: {
+                      name: functionCall.name,
+                      arguments: JSON.stringify(object(functionCall.args) ?? {}),
+                    },
+                  };
+                  toolCalls.push(call);
+                  emit({ tool_calls: [{ index, ...call }] });
+                }
+              }
+              modelParts.push(cloned);
+            }
+          }
+
+          const assistant: JsonObject = {
+            role: "assistant",
+            content: fullText || (toolCalls.length > 0 ? null : ""),
+          };
+          if (toolCalls.length > 0) assistant.tool_calls = toolCalls;
+          if (modelParts.length > 0) {
+            provider.rememberGenerateStreamContinuation(
+              body,
+              assistant,
+              { role: "model", parts: modelParts as any[] },
+              requestContents,
+              upstreamModel,
+            );
+          }
+
+          const finish = toolCalls.length > 0
+            ? "tool_calls"
+            : finalFinishReason === "MAX_TOKENS"
+              ? "length"
+              : (
+                  finalFinishReason === "SAFETY"
+                  || finalFinishReason === "BLOCKLIST"
+                  || finalFinishReason === "PROHIBITED_CONTENT"
+                  || finalFinishReason === "SPII"
+                  || finalFinishReason === "IMAGE_SAFETY"
+                  || finalFinishReason === "IMAGE_PROHIBITED_CONTENT"
+                )
+                ? "content_filter"
+                : "stop";
+          emit({}, finish);
+
+          if (streamIncludesUsage(body)) {
+            controller.enqueue(encoder.encode(`data: ${JSON.stringify({
+              id: `chatcmpl-${responseId}`,
+              object: "chat.completion.chunk",
+              created,
+              model: offer.modelId,
+              choices: [],
+              usage: generateUsagePayload(finalUsage, offer.inputTokens),
+            })}\n\n`));
+          }
+          controller.enqueue(sse("[DONE]"));
+          controller.close();
+        } catch (error) {
+          controller.error(error);
+        }
+      },
+    });
+
+    return new Response(output, {
+      status: 200,
+      headers: {
+        "content-type": "text/event-stream; charset=utf-8",
+        "cache-control": "no-cache",
+      },
+    });
+  }
+
   private classifyFailure(offer: ProviderOffer, model: GoogleModel, error: unknown): ProviderExecutionResult {
     const code = statusCode(error);
     const headers = errorHeaders(error);
