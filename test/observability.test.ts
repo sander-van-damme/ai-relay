@@ -9,25 +9,31 @@ const provider = {
   isConfigured: () => true,
   listModels: () => [
     { id: "test/one", providerId: "test", inputCapacityTokens: 100 },
-    { id: "test/unused", providerId: "test", inputCapacityTokens: 100 },
+    { id: "test/unused", providerId: "test", inputCapacityTokens: 200 },
   ],
   status: () => ({
     id: "test",
     configured: true,
     blockedUntil: null,
     models: [
-      { id: "test/one", active: 0, blockedUntil: null, overflowBlockedUntil: null },
+      { id: "test/one", active: 1, blockedUntil: null, overflowBlockedUntil: null },
       { id: "test/unused", active: 0, blockedUntil: null, overflowBlockedUntil: null },
     ],
   }),
 } as unknown as Provider;
 
-test("observability only exposes models that were actually called", () => {
+test("observability separates registered provider-contract state from called-model stats", () => {
   const stats = new Observability([provider]);
 
   const initial = stats.snapshot(0) as any;
   assert.deepEqual(initial.models, []);
   assert.deepEqual(initial.requested_models, []);
+  assert.deepEqual(
+    initial.registered_models.map((row: any) => [row.id, row.provider, row.input_capacity_tokens, row.active]),
+    [["test/one", "test", 100, 1], ["test/unused", "test", 200, 0]],
+  );
+  assert.equal(initial.providers[0].priority, 1);
+  assert.equal(initial.providers[0].configured, true);
 
   stats.request("auto", 1);
   stats.attempt("test", "test/one", 10);
@@ -48,7 +54,20 @@ test("observability only exposes models that were actually called", () => {
   assert.equal(snapshot.totals.inputTokens, 22);
   assert.equal(snapshot.totals.outputTokens, 5);
   assert.equal(snapshot.totals.totalTokens, 27);
-  assert.deepEqual(snapshot.requested_models.map((row: any) => [row.model, row.kind, row.requests]), [["auto", "auto", 1], ["test/one", "explicit", 1]]);
+  assert.deepEqual(
+    snapshot.requested_models.map((row: any) => [row.model, row.kind, row.requests]),
+    [["auto", "auto", 1], ["test/one", "explicit", 1]],
+  );
   assert.equal(snapshot.providers.length, 1);
-  assert.deepEqual(snapshot.models.map((row: any) => [row.id, row.attempts, row.successes, row.failedAttempts]), [["test/one", 2, 1, 1]]);
+  assert.deepEqual(
+    snapshot.models.map((row: any) => [
+      row.id,
+      row.provider,
+      row.input_capacity_tokens,
+      row.attempts,
+      row.successes,
+      row.failedAttempts,
+    ]),
+    [["test/one", "test", 100, 2, 1, 1]],
+  );
 });
