@@ -57,6 +57,7 @@ function assertOptimized(value: Record<string, unknown>): void {
   assert.deepEqual(compaction.keep, { tokens: 15000 });
   assert.equal(compaction.buffer, 20000);
   assert.deepEqual(value.agents, { title: { disabled: true } });
+  assert.deepEqual(value.permission, { skill: "deny" });
 }
 
 test("creates a minimal config and missing parent directory", async () => {
@@ -104,6 +105,14 @@ test("preserves existing agents", () => {
   });
 });
 
+test("merges skill permission instead of replacing existing permissions", () => {
+  const value = parseJsonc(applyOptimizations('{ "permission": { "bash": "allow" } }').text);
+  assert.deepEqual(value.permission, {
+    bash: "allow",
+    skill: "deny",
+  });
+});
+
 test("retains JSONC comments and accepts trailing commas", () => {
   const original = `{
   // Provider settings must remain documented.
@@ -126,7 +135,7 @@ test("optimization is idempotent", () => {
 test("dry run calculates changes without writing config, directory, or backup", async () => {
   const { directory, paths } = await fixture();
   const result = await optimizeConfig(paths, { dryRun: true });
-  assert.equal(result.changes.length, 7);
+  assert.equal(result.changes.length, 8);
   await assert.rejects(access(join(directory, "nested")));
   await assert.rejects(access(paths.configPath));
   await assert.rejects(access(paths.backupPath));

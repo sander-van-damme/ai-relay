@@ -12,6 +12,7 @@ export const OPTIMIZATIONS = [
   { path: ["tool_output", "max_lines"], value: 1_000 },
   { path: ["tool_output", "max_bytes"], value: 32_768 },
   { path: ["agents", "title", "disabled"], value: true },
+  { path: ["permission", "skill"], value: "deny" },
 ] as const;
 
 export interface ConfigPaths {
@@ -22,7 +23,7 @@ export interface ConfigPaths {
 export interface Change {
   path: string;
   before: unknown;
-  after: boolean | number;
+  after: boolean | number | string;
 }
 
 export interface OptimizeResult extends ConfigPaths {
@@ -89,7 +90,7 @@ function childIndent(text: string, source: ts.JsonSourceFile, object: ts.ObjectL
   return `${lineIndent(text, object.getStart(source))}  `;
 }
 
-function nestedObject(path: readonly string[], value: boolean | number, indent: string): string {
+function nestedObject(path: readonly string[], value: boolean | number | string, indent: string): string {
   if (path.length === 0) return JSON.stringify(value);
   const [head, ...tail] = path;
   return `{\n${indent}  ${JSON.stringify(head)}: ${nestedObject(tail, value, `${indent}  `)}\n${indent}}`;
@@ -130,7 +131,7 @@ function addProperty(
 function setPath(
   text: string,
   path: readonly string[],
-  value: boolean | number,
+  value: boolean | number | string,
 ): { text: string; before: unknown; changed: boolean } {
   const source = parse(text);
   let object = rootObject(source);
