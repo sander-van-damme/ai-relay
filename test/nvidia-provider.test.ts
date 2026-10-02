@@ -167,7 +167,10 @@ test("NVIDIA successful execution calls chat completions and releases concurrenc
     assert.equal(url, "https://integrate.api.nvidia.com/v1/chat/completions");
     const request = JSON.parse(String(init?.body)) as Record<string, unknown>;
     assert.equal(request.model, "openai/gpt-oss-20b");
-    return jsonResponse({ choices: [] });
+    return jsonResponse({
+      choices: [],
+      usage: { prompt_tokens: offerResult.status === "offer" ? offerResult.offer.inputTokens : 0, completion_tokens: 5, total_tokens: 7 },
+    });
   };
 
   try {
@@ -186,6 +189,7 @@ test("NVIDIA successful execution calls chat completions and releases concurrenc
     if (result.status !== "success") return;
 
     assert.equal(calls, 1);
+    assert.deepEqual(await result.usage, { outputTokens: 5, totalTokens: 7 });
     assert.equal(provider.status().models[0]?.active, 1);
     result.release();
     assert.equal(provider.status().models[0]?.active, 0);
