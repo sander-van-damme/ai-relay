@@ -10,6 +10,8 @@
     "start": "node --env-file-if-exists=.env src/index.ts",
     "dev": "node --env-file-if-exists=.env --watch src/index.ts",
     "install-service": "node scripts/install-service.mjs",
+    "opencode:optimize": "node scripts/opencode-optimize.ts",
+    "opencode:restore": "node scripts/opencode-restore.ts",
     "typecheck": "tsc --noEmit",
     "test": "node --test test/*.test.ts",
     "check": "npm run typecheck && npm test"
