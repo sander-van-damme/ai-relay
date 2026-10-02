@@ -57,6 +57,8 @@ Kimi K3 uses the Hugging Face staff-maintained standalone tokenizer repository b
 
 The Llama Vision models use the public `alpindale` mirrors because the official Meta repositories can require Hugging Face access approval. NVIDIA documents these VLMs as supporting text-only queries, but the mirror templates must still be checked against NVIDIA's hosted rendering before either model is enabled.
 
+Local counts are logged once per request/model as `nvidia_local_token_count`. For non-streaming responses that include OpenAI-style usage metadata, the provider compares NVIDIA's `usage.prompt_tokens` with the local count and logs either `nvidia_token_count_verified` or `nvidia_token_count_mismatch`. This gives us a direct hosted validation signal as models are enabled.
+
 ## Rate-limit diagnostics
 
 An NVIDIA 429 response is logged as:
