@@ -46,8 +46,8 @@ Each NVIDIA catalog model carries its own tokenizer specification:
 | `nvidia/nvidia/nemotron-3.5-lightning-30b-a3b` | `nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4` |
 | `nvidia/openai/gpt-oss-20b` | local `gpt-tokenizer/model/gpt-oss-20b` |
 | `nvidia/nvidia/nemotron-3-nano-omni-30b-a3b-reasoning` | `nvidia/Nemotron-3-Nano-Omni-30B-A3B-Reasoning-BF16` |
-| `nvidia/meta/llama-3.2-90b-vision-instruct` | public Llama 3.2 Vision tokenizer mirror `osllmai-community/Llama-3.2-90B-Vision-Instruct` |
-| `nvidia/meta/llama-3.2-11b-vision-instruct` | public Llama 3.2 Vision tokenizer mirror `unsloth/Llama-3.2-11B-Vision-Instruct` |
+| `nvidia/meta/llama-3.2-90b-vision-instruct` | public Llama 3.2 Vision tokenizer mirror `alpindale/Llama-3.2-90B-Vision-Instruct` |
+| `nvidia/meta/llama-3.2-11b-vision-instruct` | public Llama 3.2 Vision tokenizer mirror `alpindale/Llama-3.2-11B-Vision-Instruct` |
 
 GPT-OSS uses the lightweight local `gpt-tokenizer` implementation and does not need a network request during offer evaluation.
 
@@ -55,7 +55,7 @@ The other tokenizer implementations use `@huggingface/transformers` and `AutoTok
 
 Kimi K3 uses the Hugging Face staff-maintained standalone tokenizer repository because the original Kimi tokenizer historically required custom Python tokenizer code. The standalone repository supplies a normal tokenizer JSON and chat template usable from JavaScript.
 
-The Llama Vision models use public tokenizer mirrors because the official Meta repositories can require Hugging Face access approval. Those mirrors must be checked against NVIDIA's deployment before either model is enabled.
+The Llama Vision models use the public `alpindale` mirrors because the official Meta repositories can require Hugging Face access approval. NVIDIA documents these VLMs as supporting text-only queries, but the mirror templates must still be checked against NVIDIA's hosted rendering before either model is enabled.
 
 ## Rate-limit diagnostics
 
