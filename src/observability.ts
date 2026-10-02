@@ -80,7 +80,8 @@ export class Observability {
   terminalFailure(providerId?: string, modelId?: string): void {
     this.totals.terminalFailures += 1;
     if (providerId) this.providers.get(providerId)!.terminalFailures += 1;
-    if (modelId) this.models.get(modelId)?.terminalFailures += 1;
+    const model = modelId ? this.models.get(modelId) : undefined;
+    if (model) model.terminalFailures += 1;
   }
   cancellation(): void { this.totals.cancellations += 1; }
 
