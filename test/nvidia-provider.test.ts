@@ -51,7 +51,7 @@ test("NVIDIA catalog preserves all candidates, tokenizer specs, and only enables
   assert.deepEqual(provider.listModels(), [{
     id: "nvidia/openai/gpt-oss-20b",
     providerId: "nvidia",
-    inputCapacityTokens: 128_000,
+    inputCapacityTokens: 131_072,
   }]);
 });
 
