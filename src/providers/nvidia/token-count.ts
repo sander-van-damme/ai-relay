@@ -155,6 +155,13 @@ function tools(body: ChatCompletionRequest): unknown[] | undefined {
   return Array.isArray(body.tools) ? body.tools : undefined;
 }
 
+function chatTemplateKwargs(body: ChatCompletionRequest): Record<string, unknown> {
+  const value = body.chat_template_kwargs;
+  return typeof value === "object" && value !== null && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : {};
+}
+
 function countGptOss20b(body: ChatCompletionRequest): number {
   const count = countGptOss20bChatCompletionTokens({
     ...body,
@@ -175,6 +182,7 @@ async function countHuggingFaceChat(
   const requestTools = tools(body);
 
   const rendered = tokenizer.apply_chat_template(messages(body), {
+    ...chatTemplateKwargs(body),
     tokenize: true,
     return_tensor: false,
     return_dict: false,
