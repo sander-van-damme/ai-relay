@@ -5,7 +5,7 @@ This directory contains concrete providers plus optional shared implementation h
 - Concrete providers live in `src/providers/<provider>/`.
 - Reusable helpers live in `src/providers/shared/`.
 - Shared helpers are implementation details, not mandatory provider behavior.
-- A provider may use an official SDK, an OpenAI-compatible API, direct HTTP, or another transport.
+- A provider owns its transport choice, such as an official SDK, direct HTTP, or another provider-specific API.
 
 ## Core invariant
 
@@ -94,11 +94,9 @@ Do not generalize shared quota behavior just to force a provider into it. Calend
 
 ## Provider SDKs and transports
 
-Prefer an official provider SDK when it exposes capabilities or models that the OpenAI-compatible endpoint does not.
+Prefer an official provider SDK when it exposes capabilities or models that are not available through the provider's other APIs.
 
-The rest of the relay must not depend on whether a provider uses an official SDK, the shared OpenAI-compatible helper, direct HTTP or another transport.
-
-`shared/openai-compatible.ts` is a convenience implementation, not the provider abstraction itself.
+The rest of the relay must not depend on whether a provider uses an official SDK, direct HTTP, or another transport.
 
 ## Failures
 
