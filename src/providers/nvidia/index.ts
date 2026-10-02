@@ -8,6 +8,7 @@ import type {
   ProviderOffer,
   ProviderOfferResult,
   ProviderStatus,
+  ProviderUsage,
 } from "../shared/types.ts";
 import { countNvidiaInputTokens, type NvidiaTokenizerSpec } from "./token-count.ts";
 
@@ -171,6 +172,14 @@ function enabledModel(model: NvidiaModel): model is NvidiaModel & { contextWindo
   return model.enabled && typeof model.contextWindowTokens === "number" && model.contextWindowTokens > 0;
 }
 
+type JsonObject = Record<string, unknown>;
+
+function object(value: unknown): JsonObject | null {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
+    ? value as JsonObject
+    : null;
+}
+
 function parseRetryAfterMs(value: string | null, fallbackMs: number): number {
   if (!value) return fallbackMs;
   const seconds = Number(value);
@@ -247,6 +256,14 @@ class NvidiaProvider implements Provider {
         if (!Number.isSafeInteger(count) || count < 0) {
           throw new Error(`NVIDIA returned an invalid token count for ${model.id}: ${count}`);
         }
+        log("info", "nvidia_local_token_count", {
+          provider: this.id,
+          relay_model: model.id,
+          input_tokens: count,
+          tokenizer: model.tokenizer.kind === "huggingface"
+            ? model.tokenizer.repository
+            : model.tokenizer.kind,
+        });
         return count;
       })
       .catch((error) => {
@@ -379,6 +396,39 @@ class NvidiaProvider implements Provider {
     return this.providerBlockedUntil;
   }
 
+  private observeUsage(response: Response, offer: ProviderOffer): Promise<ProviderUsage | undefined> {
+    return response.json()
+      .then((payload: unknown) => {
+        const usage = object(object(payload)?.usage);
+        if (!usage) return undefined;
+
+        const promptTokens = typeof usage.prompt_tokens === "number" ? usage.prompt_tokens : undefined;
+        const completionTokens = typeof usage.completion_tokens === "number"
+          ? usage.completion_tokens
+          : undefined;
+        const totalTokens = typeof usage.total_tokens === "number" ? usage.total_tokens : undefined;
+
+        if (promptTokens !== undefined) {
+          const event = promptTokens === offer.inputTokens
+            ? "nvidia_token_count_verified"
+            : "nvidia_token_count_mismatch";
+          log(promptTokens === offer.inputTokens ? "info" : "warn", event, {
+            provider: this.id,
+            relay_model: offer.modelId,
+            local_input_tokens: offer.inputTokens,
+            upstream_input_tokens: promptTokens,
+            delta: promptTokens - offer.inputTokens,
+          });
+        }
+
+        return {
+          ...(completionTokens !== undefined ? { outputTokens: completionTokens } : {}),
+          ...(totalTokens !== undefined ? { totalTokens } : {}),
+        };
+      })
+      .catch(() => undefined);
+  }
+
   async execute(
     offer: ProviderOffer,
     body: ChatCompletionRequest,
@@ -436,10 +486,12 @@ class NvidiaProvider implements Provider {
           model_rate_limits: previousRateLimits,
         });
       }
+      const usage = stream ? undefined : this.observeUsage(response.clone(), offer);
       let released = false;
       return {
         status: "success",
         response,
+        ...(usage ? { usage } : {}),
         release: () => {
           if (released) return;
           released = true;
