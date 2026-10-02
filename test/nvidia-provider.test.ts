@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { createNvidiaProvider, NVIDIA_MODELS } from "../src/providers/nvidia/index.ts";
+import { countNvidiaInputTokens } from "../src/providers/nvidia/token-count.ts";
 
 const body = {
   messages: [{ role: "user", content: "hello" }],
@@ -30,12 +31,22 @@ function installKey(): () => void {
   };
 }
 
-test("NVIDIA catalog preserves all candidates but exposes only the verified model", () => {
+test("NVIDIA catalog preserves all candidates, tokenizer specs, and only enables GPT-OSS", () => {
   assert.equal(NVIDIA_MODELS.length, 15);
   assert.deepEqual(
     NVIDIA_MODELS.filter((model) => model.enabled).map((model) => model.id),
     ["nvidia/openai/gpt-oss-20b"],
   );
+  assert.ok(NVIDIA_MODELS.every((model) => model.tokenizer !== undefined));
+  assert.equal(
+    NVIDIA_MODELS.find((model) => model.id === "nvidia/openai/gpt-oss-20b")?.tokenizer.kind,
+    "gpt-oss-20b",
+  );
+  assert.equal(
+    NVIDIA_MODELS.filter((model) => model.tokenizer.kind === "huggingface").length,
+    14,
+  );
+
   const provider = createNvidiaProvider();
   assert.deepEqual(provider.listModels(), [{
     id: "nvidia/openai/gpt-oss-20b",
@@ -44,7 +55,7 @@ test("NVIDIA catalog preserves all candidates but exposes only the verified mode
   }]);
 });
 
-test("NVIDIA requires an API key before probing token endpoints", async () => {
+test("NVIDIA requires an API key before evaluating offers", async () => {
   const originalKey = process.env.NVIDIA_API_KEY;
   const originalFetch = globalThis.fetch;
   delete process.env.NVIDIA_API_KEY;
@@ -53,6 +64,7 @@ test("NVIDIA requires an API key before probing token endpoints", async () => {
     calls += 1;
     throw new Error("unexpected fetch");
   };
+
   try {
     const result = await createNvidiaProvider().getBestOffer(baseRequest, Date.now());
     assert.deepEqual(result, {
@@ -68,75 +80,36 @@ test("NVIDIA requires an API key before probing token endpoints", async () => {
   }
 });
 
-test("NVIDIA probes render and tokenize, selects render count, and caches the result", async () => {
+test("GPT-OSS token counting is local and produces a stable positive count", async () => {
+  const spec = NVIDIA_MODELS.find((model) => model.id === "nvidia/openai/gpt-oss-20b")!.tokenizer;
+  const first = await countNvidiaInputTokens(body, spec);
+  const second = await countNvidiaInputTokens(body, spec);
+  assert.ok(Number.isSafeInteger(first));
+  assert.ok(first > 0);
+  assert.equal(second, first);
+});
+
+test("NVIDIA offer evaluation for GPT-OSS does not make a network request", async () => {
   const restoreKey = installKey();
   const originalFetch = globalThis.fetch;
-  const calls = new Map<string, number>();
-  globalThis.fetch = async (input) => {
-    const url = String(input);
-    calls.set(url, (calls.get(url) ?? 0) + 1);
-    if (url.endsWith("/v1/chat/completions/render")) {
-      return jsonResponse({ token_ids: [1, 2, 3, 4] });
-    }
-    if (url.endsWith("/tokenize")) {
-      return jsonResponse({ count: 4, max_model_len: 128_000, tokens: [1, 2, 3, 4] });
-    }
-    throw new Error(`unexpected URL: ${url}`);
+  let calls = 0;
+  globalThis.fetch = async () => {
+    calls += 1;
+    throw new Error("unexpected fetch");
   };
 
   try {
     const provider = createNvidiaProvider();
     const first = await provider.getBestOffer(baseRequest, Date.now());
     assert.equal(first.status, "offer");
-    if (first.status === "offer") assert.equal(first.offer.inputTokens, 4);
+    if (first.status === "offer") assert.ok(first.offer.inputTokens > 0);
 
     const second = await provider.getBestOffer(baseRequest, Date.now());
     assert.equal(second.status, "offer");
-    assert.equal(calls.get("https://integrate.api.nvidia.com/v1/chat/completions/render"), 1);
-    assert.equal(calls.get("https://integrate.api.nvidia.com/tokenize"), 1);
-  } finally {
-    globalThis.fetch = originalFetch;
-    restoreKey();
-  }
-});
-
-test("NVIDIA falls back to tokenize when hosted chat render is unavailable", async () => {
-  const restoreKey = installKey();
-  const originalFetch = globalThis.fetch;
-  globalThis.fetch = async (input) => {
-    const url = String(input);
-    if (url.endsWith("/v1/chat/completions/render")) {
-      return jsonResponse({ error: "not found" }, 404);
+    if (first.status === "offer" && second.status === "offer") {
+      assert.equal(second.offer.inputTokens, first.offer.inputTokens);
     }
-    if (url.endsWith("/tokenize")) {
-      return jsonResponse({ count: 7, max_model_len: 128_000, tokens: [1, 2, 3, 4, 5, 6, 7] });
-    }
-    throw new Error(`unexpected URL: ${url}`);
-  };
-
-  try {
-    const result = await createNvidiaProvider().getBestOffer(baseRequest, Date.now());
-    assert.equal(result.status, "offer");
-    if (result.status === "offer") assert.equal(result.offer.inputTokens, 7);
-  } finally {
-    globalThis.fetch = originalFetch;
-    restoreKey();
-  }
-});
-
-test("NVIDIA refuses to advertise an offer when both authoritative token probes fail", async () => {
-  const restoreKey = installKey();
-  const originalFetch = globalThis.fetch;
-  globalThis.fetch = async () => jsonResponse({ error: "unsupported" }, 404);
-
-  try {
-    const result = await createNvidiaProvider().getBestOffer(baseRequest, Date.now());
-    assert.equal(result.status, "no_offer");
-    if (result.status === "no_offer") {
-      assert.equal(result.reason, "token_count_failed");
-      assert.match(result.detail ?? "", /chat_render=404/);
-      assert.match(result.detail ?? "", /tokenize=404/);
-    }
+    assert.equal(calls, 0);
   } finally {
     globalThis.fetch = originalFetch;
     restoreKey();
@@ -146,14 +119,12 @@ test("NVIDIA refuses to advertise an offer when both authoritative token probes 
 test("NVIDIA treats 429 as model-scoped and respects Retry-After", async () => {
   const restoreKey = installKey();
   const originalFetch = globalThis.fetch;
+  let calls = 0;
   globalThis.fetch = async (input) => {
     const url = String(input);
-    if (url.endsWith("/v1/chat/completions/render")) return jsonResponse({ token_ids: [1, 2, 3] });
-    if (url.endsWith("/tokenize")) return jsonResponse({ count: 3, tokens: [1, 2, 3], max_model_len: 128_000 });
-    if (url.endsWith("/v1/chat/completions")) {
-      return jsonResponse({ error: { message: "rate limited" } }, 429, { "retry-after": "2" });
-    }
-    throw new Error(`unexpected URL: ${url}`);
+    calls += 1;
+    assert.equal(url, "https://integrate.api.nvidia.com/v1/chat/completions");
+    return jsonResponse({ error: { message: "rate limited" } }, 429, { "retry-after": "2" });
   };
 
   try {
@@ -175,6 +146,8 @@ test("NVIDIA treats 429 as model-scoped and respects Retry-After", async () => {
       assert.equal(result.reason, "rate_limit");
       assert.ok(result.retryAt >= failedAt + 2_000);
     }
+
+    assert.equal(calls, 1);
     const modelStatus = provider.status().models[0];
     assert.ok((modelStatus?.blockedUntil ?? 0) >= failedAt + 2_000);
     assert.equal(provider.status().blockedUntil, null);
@@ -184,15 +157,17 @@ test("NVIDIA treats 429 as model-scoped and respects Retry-After", async () => {
   }
 });
 
-test("NVIDIA successful execution releases model concurrency state", async () => {
+test("NVIDIA successful execution calls chat completions and releases concurrency state", async () => {
   const restoreKey = installKey();
   const originalFetch = globalThis.fetch;
-  globalThis.fetch = async (input) => {
+  let calls = 0;
+  globalThis.fetch = async (input, init) => {
     const url = String(input);
-    if (url.endsWith("/v1/chat/completions/render")) return jsonResponse({ token_ids: [1, 2] });
-    if (url.endsWith("/tokenize")) return jsonResponse({ count: 2, tokens: [1, 2], max_model_len: 128_000 });
-    if (url.endsWith("/v1/chat/completions")) return jsonResponse({ choices: [] });
-    throw new Error(`unexpected URL: ${url}`);
+    calls += 1;
+    assert.equal(url, "https://integrate.api.nvidia.com/v1/chat/completions");
+    const request = JSON.parse(String(init?.body)) as Record<string, unknown>;
+    assert.equal(request.model, "openai/gpt-oss-20b");
+    return jsonResponse({ choices: [] });
   };
 
   try {
@@ -209,6 +184,8 @@ test("NVIDIA successful execution releases model concurrency state", async () =>
     );
     assert.equal(result.status, "success");
     if (result.status !== "success") return;
+
+    assert.equal(calls, 1);
     assert.equal(provider.status().models[0]?.active, 1);
     result.release();
     assert.equal(provider.status().models[0]?.active, 0);
