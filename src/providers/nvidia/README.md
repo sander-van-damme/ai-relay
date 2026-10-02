@@ -1,6 +1,6 @@
 # NVIDIA provider
 
-The NVIDIA provider is implemented as an isolated provider using direct `fetch` calls to NVIDIA's hosted OpenAI-compatible API at `https://integrate.api.nvidia.com`. It does not reuse `shared/openai-compatible.ts`.
+The NVIDIA provider is implemented as an isolated provider using direct `fetch` calls to NVIDIA's hosted chat-completions API at `https://integrate.api.nvidia.com`.
 
 ## Current scope
 
