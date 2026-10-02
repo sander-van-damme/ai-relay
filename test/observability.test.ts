@@ -7,12 +7,28 @@ const provider = {
   id: "test",
   priority: 1,
   isConfigured: () => true,
-  listModels: () => [{ id: "test/one", providerId: "test", inputCapacityTokens: 100 }],
-  status: () => ({ id: "test", configured: true, blockedUntil: null, models: [{ id: "test/one", active: 0, blockedUntil: null, overflowBlockedUntil: null }] }),
+  listModels: () => [
+    { id: "test/one", providerId: "test", inputCapacityTokens: 100 },
+    { id: "test/unused", providerId: "test", inputCapacityTokens: 100 },
+  ],
+  status: () => ({
+    id: "test",
+    configured: true,
+    blockedUntil: null,
+    models: [
+      { id: "test/one", active: 0, blockedUntil: null, overflowBlockedUntil: null },
+      { id: "test/unused", active: 0, blockedUntil: null, overflowBlockedUntil: null },
+    ],
+  }),
 } as unknown as Provider;
 
-test("observability separates terminal requests from failed failover attempts", () => {
+test("observability only exposes models that were actually called", () => {
   const stats = new Observability([provider]);
+
+  const initial = stats.snapshot(0) as any;
+  assert.deepEqual(initial.models, []);
+  assert.deepEqual(initial.requested_models, []);
+
   stats.request("auto", 1);
   stats.attempt("test", "test/one", 10);
   stats.failedAttempt("test", "test/one");
@@ -34,5 +50,5 @@ test("observability separates terminal requests from failed failover attempts", 
   assert.equal(snapshot.totals.totalTokens, 27);
   assert.deepEqual(snapshot.requested_models.map((row: any) => [row.model, row.kind, row.requests]), [["auto", "auto", 1], ["test/one", "explicit", 1]]);
   assert.equal(snapshot.providers.length, 1);
-  assert.equal(snapshot.models.length, 1);
+  assert.deepEqual(snapshot.models.map((row: any) => [row.id, row.attempts, row.successes, row.failedAttempts]), [["test/one", 2, 1, 1]]);
 });
