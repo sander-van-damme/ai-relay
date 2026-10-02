@@ -703,6 +703,7 @@ test("Antigravity still overrides default tools when the caller provides no func
         return completedInteraction("agent-no-tools", "Hello back", "env-no-tools");
       }),
       [antigravity],
+      async () => 10,
     );
     const body = { messages: [{ role: "user", content: "Hello" }] };
     const offer = (await bestOffer(provider, {
@@ -964,7 +965,6 @@ test("generateContent fallback streaming is translated to OpenAI SSE", async () 
     const provider = new GoogleProvider(() => client, [robotics]);
     const body = {
       messages: [{ role: "user", content: "Move" }],
-      stream_options: { include_usage: true },
     };
     const offer = (await bestOffer(provider, {
       ...standardRequest,
@@ -980,8 +980,9 @@ test("generateContent fallback streaming is translated to OpenAI SSE", async () 
     assert.match(text, /"content":"Move"/);
     assert.match(text, /"content":" done"/);
     assert.match(text, /"finish_reason":"stop"/);
-    assert.match(text, /"prompt_tokens":10/);
+    assert.doesNotMatch(text, /"prompt_tokens":10/);
     assert.match(text, /data: \[DONE\]/);
+    assert.deepEqual(await result.usage, { outputTokens: 2, totalTokens: 12 });
   } finally {
     if (originalKey === undefined) delete process.env.GEMINI_API_KEY;
     else process.env.GEMINI_API_KEY = originalKey;

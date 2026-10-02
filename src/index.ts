@@ -1,9 +1,11 @@
 import { randomUUID } from "node:crypto";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
+import { createReadStream } from "node:fs";
 import { loadConfig } from "./config.ts";
-import { log } from "./log.ts";
+import { log, sessionLogFilename, sessionLogPath } from "./log.ts";
 import { isAutoModel, RelayScheduler } from "./relay.ts";
 import type { ChatCompletionRequest, RelayJob } from "./types.ts";
+import { OBSERVABILITY_HTML } from "./dashboard.ts";
 
 function json(response: ServerResponse, status: number, value: unknown): void {
   response.writeHead(status, {
@@ -92,7 +94,7 @@ async function main(): Promise<void> {
       json(response, 200, {
         name: "ai-relay",
         mode: "provider-offer-scheduler",
-        endpoints: ["/health", "/v1/models", "/v1/chat/completions"],
+        endpoints: ["/health", "/v1/models", "/v1/chat/completions", "/observability", "/observability/stats", "/observability/logs"],
       });
       return;
     }
@@ -102,6 +104,24 @@ async function main(): Promise<void> {
     }
     if (request.method === "GET" && url.pathname === "/v1/models") {
       json(response, 200, modelsPayload(scheduler));
+      return;
+    }
+    if (request.method === "GET" && url.pathname === "/observability") {
+      response.writeHead(200, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" });
+      response.end(OBSERVABILITY_HTML);
+      return;
+    }
+    if (request.method === "GET" && url.pathname === "/observability/stats") {
+      json(response, 200, scheduler.observability.snapshot(scheduler.queue.filter((job) => !job.cancelled).length));
+      return;
+    }
+    if (request.method === "GET" && url.pathname === "/observability/logs") {
+      response.writeHead(200, {
+        "content-type": "application/x-ndjson; charset=utf-8",
+        "content-disposition": `attachment; filename="${sessionLogFilename}"`,
+        "cache-control": "no-store",
+      });
+      createReadStream(sessionLogPath).on("error", () => response.end()).pipe(response);
       return;
     }
     if (request.method !== "POST" || url.pathname !== "/v1/chat/completions") {
@@ -149,6 +169,7 @@ async function main(): Promise<void> {
     response.once("close", () => {
       if (response.writableEnded) return;
       job.cancelled = true;
+      scheduler.recordClientCancellation();
       job.upstreamAbort?.abort(new Error("client disconnected"));
       log("info", "client_disconnected", { request_id: job.id });
     });
