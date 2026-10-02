@@ -191,7 +191,7 @@ async function countHuggingFaceChat(
   });
 
   const count = tokenLength(rendered);
-  if (!Number.isSafeInteger(count) || count === null || count < 0) {
+  if (count === null || !Number.isSafeInteger(count) || count < 0) {
     throw new Error(
       `Hugging Face tokenizer ${spec.repository} returned an unsupported tokenized result.`,
     );
