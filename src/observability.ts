@@ -22,18 +22,14 @@ export class Observability {
   private readonly totals = counters();
   private readonly providers = new Map<string, Counters>();
   private readonly models = new Map<string, Counters>();
+  private readonly modelProviders = new Map<string, string>();
   private readonly requestedModels = new Map<string, number>();
   private readonly registeredProviders: readonly Provider[];
 
   constructor(registeredProviders: readonly Provider[]) {
     this.registeredProviders = registeredProviders;
-    this.requestedModels.set("auto", 0);
     for (const provider of registeredProviders) {
       this.providers.set(provider.id, counters());
-      for (const model of provider.listModels()) {
-        this.models.set(model.id, counters());
-        this.requestedModels.set(model.id, 0);
-      }
     }
   }
 
@@ -43,8 +39,19 @@ export class Observability {
     this.peakQueueDepth = Math.max(this.peakQueueDepth, queueDepth);
   }
 
+  private modelCounters(providerId: string, modelId: string): Counters {
+    let value = this.models.get(modelId);
+    if (!value) {
+      value = counters();
+      this.models.set(modelId, value);
+    }
+    this.modelProviders.set(modelId, providerId);
+    return value;
+  }
+
   attempt(providerId: string, modelId: string, inputTokens: number): void {
-    for (const item of [this.totals, this.providers.get(providerId), this.models.get(modelId)]) {
+    const model = this.modelCounters(providerId, modelId);
+    for (const item of [this.totals, this.providers.get(providerId), model]) {
       if (!item) continue;
       item.attempts += 1;
       item.inputTokens += inputTokens;
@@ -53,13 +60,15 @@ export class Observability {
   }
 
   failedAttempt(providerId: string, modelId: string): void {
-    for (const item of [this.totals, this.providers.get(providerId), this.models.get(modelId)]) {
+    const model = this.models.get(modelId);
+    for (const item of [this.totals, this.providers.get(providerId), model]) {
       if (item) item.failedAttempts += 1;
     }
   }
 
   success(providerId: string, modelId: string, inputTokens: number, usage?: ProviderUsage): void {
-    for (const item of [this.totals, this.providers.get(providerId), this.models.get(modelId)]) {
+    const model = this.models.get(modelId);
+    for (const item of [this.totals, this.providers.get(providerId), model]) {
       if (!item) continue;
       item.successes += 1;
       if (usage?.outputTokens !== undefined) item.outputTokens += usage.outputTokens;
@@ -71,7 +80,7 @@ export class Observability {
   terminalFailure(providerId?: string, modelId?: string): void {
     this.totals.terminalFailures += 1;
     if (providerId) this.providers.get(providerId)!.terminalFailures += 1;
-    if (modelId) this.models.get(modelId)!.terminalFailures += 1;
+    if (modelId) this.models.get(modelId)?.terminalFailures += 1;
   }
   cancellation(): void { this.totals.cancellations += 1; }
 
@@ -88,7 +97,7 @@ export class Observability {
         return { id, ...value, configured: health?.configured ?? false, blocked_until: health?.blockedUntil ? new Date(health.blockedUntil).toISOString() : null };
       }),
       models: [...this.models].map(([id, value]) => {
-        const providerId = this.registeredProviders.find((provider) => provider.listModels().some((model) => model.id === id))?.id ?? "unknown";
+        const providerId = this.modelProviders.get(id) ?? "unknown";
         const health = status.get(providerId)?.models.find((model) => model.id === id);
         return { id, provider: providerId, ...value, active: health?.active ?? 0, blocked_until: health?.blockedUntil ? new Date(health.blockedUntil).toISOString() : null, overflow_blocked_until: health?.overflowBlockedUntil ? new Date(health.overflowBlockedUntil).toISOString() : null };
       }),
