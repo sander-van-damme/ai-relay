@@ -145,6 +145,22 @@ Useful scheduler fields include `failure_count`, `optimization_wait_ms`, `queue_
 
 Provider offer evaluation is logged structurally. At the default `LOG_LEVEL=info`, dispatches, upstream responses, failures, cooldown transitions, recovery, and confirmed/expired overflow boundaries are visible without logging every candidate evaluation. Google emits `google_history_recovery` when it has to bootstrap Antigravity from a transcript or replay external tool history through GenerateContent. Model/provider rejections include a bounded `detail` field derived from the upstream error body; structured `error.code`, `error.status`, and `error.message` are preferred, common credential patterns are redacted, and fallback text is capped at 1,000 characters. Set `LOG_LEVEL=debug` to also see `provider_offer` and `provider_no_offer` events for every provider offer pass, including offer kind, model, authoritative input tokens, effective capacity, availability, and structured no-offer reasons.
 
+## OpenCode token optimization
+
+This repository includes an optional utility that updates the global OpenCode configuration at `~/.config/opencode/opencode.jsonc` without replacing unrelated settings, comments, or trailing commas:
+
+```bash
+npm run opencode:optimize
+npm run opencode:optimize -- --dry-run
+npm run opencode:restore
+```
+
+The optimizer disables model/session warming and the built-in title agent, avoiding LLM requests that do not contribute to engineering work. It caps individual tool results at 1,000 lines and 32 KiB because large test, compiler, diff, and search output would otherwise remain in conversation context. It also enables automatic conversation compaction. Compaction intentionally makes an LLM request, but its smaller context reduces tokens repeatedly sent by later requests; OpenCode's compaction agent remains enabled.
+
+Conversation compaction is **lossy**. Put long-lived project requirements and agent instructions in durable repository files (such as `AGENTS.md`) rather than relying only on the first message of a long OpenCode session.
+
+Before changing an existing file, the utility creates `opencode.jsonc.backup` once and never silently overwrites it. The restore command copies that saved configuration back, and fails clearly when no backup exists. Dry-run reports proposed changes without creating a directory, config, or backup.
+
 ## Development
 
 ```bash
