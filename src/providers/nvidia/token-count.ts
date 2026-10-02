@@ -170,6 +170,10 @@ function chatTemplateKwargs(body: ChatCompletionRequest): Record<string, unknown
 }
 
 function countGptOss20b(body: ChatCompletionRequest): number {
+  if (!countGptOss20bChatCompletionTokens) {
+    throw new Error("gpt-tokenizer does not expose chat-completion counting for gpt-oss-20b.");
+  }
+
   const count = countGptOss20bChatCompletionTokens({
     ...body,
     model: "gpt-oss-20b",
