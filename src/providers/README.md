@@ -35,6 +35,8 @@ Counting may be asynchronous because some providers can only determine the autho
 
 `ProviderOffer.inputTokens` is the authoritative count used for that offer. Execution and quota accounting must reuse that exact value rather than tokenizing the request again.
 
+Token-counting implementations and caches remain provider-owned even when two providers expose the same underlying model. Providers can apply different chat templates, injected instructions, tool serialization, special tokens or deployment-specific preprocessing, so a count produced for one provider must not be reused by another unless their rendered-input semantics have been explicitly proven identical. Sharing a low-level tokenizer library is fine; sharing a higher-level rendered-request count is not the default.
+
 Providers may cache token counts per request/model so repeated standard/overflow evaluation does not repeat expensive tokenization or network calls. A failed count must not be cached permanently when a later retry could succeed.
 
 ## Offer selection

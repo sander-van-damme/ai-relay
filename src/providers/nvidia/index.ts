@@ -8,8 +8,9 @@ import type {
   ProviderOffer,
   ProviderOfferResult,
   ProviderStatus,
+  ProviderUsage,
 } from "../shared/types.ts";
-import { countNvidiaInputTokens } from "./token-count.ts";
+import { countNvidiaInputTokens, type NvidiaTokenizerSpec } from "./token-count.ts";
 
 const NVIDIA_BASE_URL = "https://integrate.api.nvidia.com";
 const DEFAULT_RETRY_MS = 5_000;
@@ -23,6 +24,7 @@ export interface NvidiaModel {
   contextWindowTokens: number | null;
   preference: number;
   enabled: boolean;
+  tokenizer: NvidiaTokenizerSpec;
 }
 
 // General-purpose chat/text candidates from the NVIDIA free-endpoint catalog,
@@ -31,21 +33,126 @@ export interface NvidiaModel {
 // should be enabled. Disabled upstream IDs are catalog slugs and must be
 // verified against NVIDIA's API before those models are enabled.
 export const NVIDIA_MODELS: readonly NvidiaModel[] = [
-  { id: "nvidia/deepseek-ai/deepseek-v4.1-flash", upstreamModel: "deepseek-ai/deepseek-v4.1-flash", contextWindowTokens: null, preference: 1_500, enabled: false },
-  { id: "nvidia/z-ai/glm-5-3", upstreamModel: "z-ai/glm-5-3", contextWindowTokens: null, preference: 1_400, enabled: false },
-  { id: "nvidia/moonshotai/kimi-k3", upstreamModel: "moonshotai/kimi-k3", contextWindowTokens: null, preference: 1_300, enabled: false },
-  { id: "nvidia/z-ai/glm-5-3-flash", upstreamModel: "z-ai/glm-5-3-flash", contextWindowTokens: null, preference: 1_200, enabled: false },
-  { id: "nvidia/nvidia/nemotron-3-ultra-550b-a55b", upstreamModel: "nvidia/nemotron-3-ultra-550b-a55b", contextWindowTokens: null, preference: 1_100, enabled: false },
-  { id: "nvidia/meta/muse-glimmer-30b", upstreamModel: "meta/muse-glimmer-30b", contextWindowTokens: null, preference: 1_000, enabled: false },
-  { id: "nvidia/poolside/laguna-xs-2.1", upstreamModel: "poolside/laguna-xs-2.1", contextWindowTokens: null, preference: 900, enabled: false },
-  { id: "nvidia/google/gemma-4-31b-it", upstreamModel: "google/gemma-4-31b-it", contextWindowTokens: null, preference: 800, enabled: false },
-  { id: "nvidia/nvidia/nemotron-3-super-120b-a12b", upstreamModel: "nvidia/nemotron-3-super-120b-a12b", contextWindowTokens: null, preference: 700, enabled: false },
-  { id: "nvidia/google/diffusiongemma-26b-a4b-it", upstreamModel: "google/diffusiongemma-26b-a4b-it", contextWindowTokens: null, preference: 600, enabled: false },
-  { id: "nvidia/nvidia/nemotron-3.5-lightning-30b-a3b", upstreamModel: "nvidia/nemotron-3.5-lightning-30b-a3b", contextWindowTokens: null, preference: 500, enabled: false },
-  { id: "nvidia/openai/gpt-oss-20b", upstreamModel: "openai/gpt-oss-20b", contextWindowTokens: 128_000, preference: 400, enabled: true },
-  { id: "nvidia/nvidia/nemotron-3-nano-omni-30b-a3b-reasoning", upstreamModel: "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning", contextWindowTokens: null, preference: 300, enabled: false },
-  { id: "nvidia/meta/llama-3.2-90b-vision-instruct", upstreamModel: "meta/llama-3.2-90b-vision-instruct", contextWindowTokens: null, preference: 200, enabled: false },
-  { id: "nvidia/meta/llama-3.2-11b-vision-instruct", upstreamModel: "meta/llama-3.2-11b-vision-instruct", contextWindowTokens: null, preference: 100, enabled: false },
+  {
+    id: "nvidia/deepseek-ai/deepseek-v4.1-flash",
+    upstreamModel: "deepseek-ai/deepseek-v4.1-flash",
+    contextWindowTokens: null,
+    preference: 1_500,
+    enabled: false,
+    tokenizer: { kind: "huggingface", repository: "deepseek-ai/DeepSeek-V4.1-Flash" },
+  },
+  {
+    id: "nvidia/z-ai/glm-5-3",
+    upstreamModel: "z-ai/glm-5-3",
+    contextWindowTokens: null,
+    preference: 1_400,
+    enabled: false,
+    tokenizer: { kind: "huggingface", repository: "zai-org/GLM-5.3" },
+  },
+  {
+    id: "nvidia/moonshotai/kimi-k3",
+    upstreamModel: "moonshotai/kimi-k3",
+    contextWindowTokens: null,
+    preference: 1_300,
+    enabled: false,
+    tokenizer: { kind: "huggingface", repository: "Xenova/Kimi-K3-tokenizer" },
+  },
+  {
+    id: "nvidia/z-ai/glm-5-3-flash",
+    upstreamModel: "z-ai/glm-5-3-flash",
+    contextWindowTokens: null,
+    preference: 1_200,
+    enabled: false,
+    tokenizer: { kind: "huggingface", repository: "zai-org/GLM-5.3-Flash" },
+  },
+  {
+    id: "nvidia/nvidia/nemotron-3-ultra-550b-a55b",
+    upstreamModel: "nvidia/nemotron-3-ultra-550b-a55b",
+    contextWindowTokens: null,
+    preference: 1_100,
+    enabled: false,
+    tokenizer: { kind: "huggingface", repository: "nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-NVFP4" },
+  },
+  {
+    id: "nvidia/meta/muse-glimmer-30b",
+    upstreamModel: "meta/muse-glimmer-30b",
+    contextWindowTokens: null,
+    preference: 1_000,
+    enabled: false,
+    tokenizer: { kind: "huggingface", repository: "meta-models/Muse-Glimmer-30B" },
+  },
+  {
+    id: "nvidia/poolside/laguna-xs-2.1",
+    upstreamModel: "poolside/laguna-xs-2.1",
+    contextWindowTokens: null,
+    preference: 900,
+    enabled: false,
+    tokenizer: { kind: "huggingface", repository: "poolside/Laguna-XS-2.1" },
+  },
+  {
+    id: "nvidia/google/gemma-4-31b-it",
+    upstreamModel: "google/gemma-4-31b-it",
+    contextWindowTokens: null,
+    preference: 800,
+    enabled: false,
+    tokenizer: { kind: "huggingface", repository: "nvidia/Gemma-4-31B-IT-NVFP4" },
+  },
+  {
+    id: "nvidia/nvidia/nemotron-3-super-120b-a12b",
+    upstreamModel: "nvidia/nemotron-3-super-120b-a12b",
+    contextWindowTokens: null,
+    preference: 700,
+    enabled: false,
+    tokenizer: { kind: "huggingface", repository: "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-FP8" },
+  },
+  {
+    id: "nvidia/google/diffusiongemma-26b-a4b-it",
+    upstreamModel: "google/diffusiongemma-26b-a4b-it",
+    contextWindowTokens: null,
+    preference: 600,
+    enabled: false,
+    tokenizer: { kind: "huggingface", repository: "nvidia/diffusiongemma-26B-A4B-it-NVFP4" },
+  },
+  {
+    id: "nvidia/nvidia/nemotron-3.5-lightning-30b-a3b",
+    upstreamModel: "nvidia/nemotron-3.5-lightning-30b-a3b",
+    contextWindowTokens: null,
+    preference: 500,
+    enabled: false,
+    tokenizer: { kind: "huggingface", repository: "nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4" },
+  },
+  {
+    id: "nvidia/openai/gpt-oss-20b",
+    upstreamModel: "openai/gpt-oss-20b",
+    contextWindowTokens: 131_072,
+    preference: 400,
+    enabled: true,
+    tokenizer: { kind: "gpt-oss-20b" },
+  },
+  {
+    id: "nvidia/nvidia/nemotron-3-nano-omni-30b-a3b-reasoning",
+    upstreamModel: "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning",
+    contextWindowTokens: null,
+    preference: 300,
+    enabled: false,
+    tokenizer: { kind: "huggingface", repository: "nvidia/Nemotron-3-Nano-Omni-30B-A3B-Reasoning-BF16" },
+  },
+  {
+    id: "nvidia/meta/llama-3.2-90b-vision-instruct",
+    upstreamModel: "meta/llama-3.2-90b-vision-instruct",
+    contextWindowTokens: null,
+    preference: 200,
+    enabled: false,
+    tokenizer: { kind: "huggingface", repository: "alpindale/Llama-3.2-90B-Vision-Instruct" },
+  },
+  {
+    id: "nvidia/meta/llama-3.2-11b-vision-instruct",
+    upstreamModel: "meta/llama-3.2-11b-vision-instruct",
+    contextWindowTokens: null,
+    preference: 100,
+    enabled: false,
+    tokenizer: { kind: "huggingface", repository: "alpindale/Llama-3.2-11B-Vision-Instruct" },
+  },
 ];
 
 interface NvidiaModelState {
@@ -63,6 +170,14 @@ interface Candidate {
 
 function enabledModel(model: NvidiaModel): model is NvidiaModel & { contextWindowTokens: number } {
   return model.enabled && typeof model.contextWindowTokens === "number" && model.contextWindowTokens > 0;
+}
+
+type JsonObject = Record<string, unknown>;
+
+function object(value: unknown): JsonObject | null {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
+    ? value as JsonObject
+    : null;
 }
 
 function parseRetryAfterMs(value: string | null, fallbackMs: number): number {
@@ -128,9 +243,6 @@ class NvidiaProvider implements Provider {
   }
 
   private async countInputTokens(body: ChatCompletionRequest, model: NvidiaModel): Promise<number> {
-    const apiKey = process.env.NVIDIA_API_KEY?.trim();
-    if (!apiKey) throw new Error("NVIDIA_API_KEY is not configured.");
-
     let perModel = this.tokenCountCache.get(body);
     if (!perModel) {
       perModel = new Map<string, Promise<number>>();
@@ -139,11 +251,19 @@ class NvidiaProvider implements Provider {
     const cached = perModel.get(model.id);
     if (cached) return cached;
 
-    const pending = countNvidiaInputTokens(body, model.id, model.upstreamModel, apiKey)
-      .then(({ count }) => {
+    const pending = countNvidiaInputTokens(body, model.tokenizer)
+      .then((count) => {
         if (!Number.isSafeInteger(count) || count < 0) {
           throw new Error(`NVIDIA returned an invalid token count for ${model.id}: ${count}`);
         }
+        log("info", "nvidia_local_token_count", {
+          provider: this.id,
+          relay_model: model.id,
+          input_tokens: count,
+          tokenizer: model.tokenizer.kind === "huggingface"
+            ? model.tokenizer.repository
+            : model.tokenizer.kind,
+        });
         return count;
       })
       .catch((error) => {
@@ -276,6 +396,39 @@ class NvidiaProvider implements Provider {
     return this.providerBlockedUntil;
   }
 
+  private observeUsage(response: Response, offer: ProviderOffer): Promise<ProviderUsage | undefined> {
+    return response.json()
+      .then((payload: unknown) => {
+        const usage = object(object(payload)?.usage);
+        if (!usage) return undefined;
+
+        const promptTokens = typeof usage.prompt_tokens === "number" ? usage.prompt_tokens : undefined;
+        const completionTokens = typeof usage.completion_tokens === "number"
+          ? usage.completion_tokens
+          : undefined;
+        const totalTokens = typeof usage.total_tokens === "number" ? usage.total_tokens : undefined;
+
+        if (promptTokens !== undefined) {
+          const event = promptTokens === offer.inputTokens
+            ? "nvidia_token_count_verified"
+            : "nvidia_token_count_mismatch";
+          log(promptTokens === offer.inputTokens ? "info" : "warn", event, {
+            provider: this.id,
+            relay_model: offer.modelId,
+            local_input_tokens: offer.inputTokens,
+            upstream_input_tokens: promptTokens,
+            delta: promptTokens - offer.inputTokens,
+          });
+        }
+
+        return {
+          ...(completionTokens !== undefined ? { outputTokens: completionTokens } : {}),
+          ...(totalTokens !== undefined ? { totalTokens } : {}),
+        };
+      })
+      .catch(() => undefined);
+  }
+
   async execute(
     offer: ProviderOffer,
     body: ChatCompletionRequest,
@@ -333,10 +486,12 @@ class NvidiaProvider implements Provider {
           model_rate_limits: previousRateLimits,
         });
       }
+      const usage = stream ? undefined : this.observeUsage(response.clone(), offer);
       let released = false;
       return {
         status: "success",
         response,
+        ...(usage ? { usage } : {}),
         release: () => {
           if (released) return;
           released = true;

@@ -1,176 +1,225 @@
-import { log } from "../../log.ts";
+import { countChatCompletionTokens as countGptOss20bChatCompletionTokens } from "gpt-tokenizer/model/gpt-oss-20b";
 import type { ChatCompletionRequest } from "../../types.ts";
 
-const NVIDIA_BASE_URL = "https://integrate.api.nvidia.com";
-const TOKEN_PROBE_TIMEOUT_MS = 10_000;
-const MAX_ERROR_DETAIL = 500;
+const TOKENIZER_ASSET_TIMEOUT_MS = 15_000;
 
-type JsonObject = Record<string, unknown>;
-
-export interface NvidiaTokenCountResult {
-  count: number;
-  method: "chat_render" | "tokenize";
-}
-
-interface ProbeResult {
-  method: NvidiaTokenCountResult["method"];
-  ok: boolean;
-  count?: number;
-  status?: number;
-  detail?: string;
-}
-
-function object(value: unknown): JsonObject | null {
-  return typeof value === "object" && value !== null && !Array.isArray(value)
-    ? value as JsonObject
-    : null;
-}
-
-function detail(text: string): string {
-  return text.replace(/\s+/g, " ").trim().slice(0, MAX_ERROR_DETAIL);
-}
-
-function tokenizerPayload(body: ChatCompletionRequest, upstreamModel: string): JsonObject {
-  const payload: JsonObject = {
-    model: upstreamModel,
-    messages: body.messages,
-  };
-  if (body.tools !== undefined) payload.tools = body.tools;
-  if (body.chat_template_kwargs !== undefined) payload.chat_template_kwargs = body.chat_template_kwargs;
-  return payload;
-}
-
-async function postProbe(
-  path: string,
-  payload: JsonObject,
-  apiKey: string,
-  method: ProbeResult["method"],
-  relayModelId: string,
-): Promise<ProbeResult> {
-  let response: Response;
-  try {
-    response = await fetch(`${NVIDIA_BASE_URL}${path}`, {
-      method: "POST",
-      headers: {
-        authorization: `Bearer ${apiKey}`,
-        "content-type": "application/json",
-        accept: "application/json",
-        "user-agent": "ai-relay/1.0",
-      },
-      body: JSON.stringify(payload),
-      signal: AbortSignal.timeout(TOKEN_PROBE_TIMEOUT_MS),
-    });
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    log("warn", `nvidia_tokenizer_probe_${method}_failed`, {
-      provider: "nvidia",
-      relay_model: relayModelId,
-      reason: "network_error",
-      detail: message,
-    });
-    return { method, ok: false, detail: message };
-  }
-
-  const bodyText = await response.text().catch(() => "");
-  if (!response.ok) {
-    log("warn", `nvidia_tokenizer_probe_${method}_failed`, {
-      provider: "nvidia",
-      relay_model: relayModelId,
-      status: response.status,
-      detail: detail(bodyText || response.statusText),
-    });
-    return {
-      method,
-      ok: false,
-      status: response.status,
-      detail: detail(bodyText || response.statusText),
+export type NvidiaTokenizerSpec =
+  | {
+      kind: "gpt-oss-20b";
+    }
+  | {
+      kind: "huggingface";
+      repository: string;
+      revision?: string;
     };
-  }
 
-  let parsed: unknown;
+interface ChatTemplateTokenizer {
+  chat_template?: unknown;
+  get_chat_template?: (options?: Record<string, unknown>) => unknown;
+  apply_chat_template(
+    conversation: unknown[],
+    options?: Record<string, unknown>,
+  ): unknown;
+}
+
+const huggingFaceTokenizerCache = new Map<string, Promise<ChatTemplateTokenizer>>();
+
+function tokenizerCacheKey(spec: Extract<NvidiaTokenizerSpec, { kind: "huggingface" }>): string {
+  return `${spec.repository}@${spec.revision ?? "main"}`;
+}
+
+function hasChatTemplate(tokenizer: ChatTemplateTokenizer): boolean {
   try {
-    parsed = JSON.parse(bodyText) as unknown;
+    if (typeof tokenizer.get_chat_template === "function") {
+      const template = tokenizer.get_chat_template();
+      if (typeof template === "string" && template.trim()) return true;
+      if (Array.isArray(template) && template.length > 0) return true;
+    }
   } catch {
-    const message = "Tokenizer endpoint returned invalid JSON.";
-    log("warn", `nvidia_tokenizer_probe_${method}_failed`, {
-      provider: "nvidia",
-      relay_model: relayModelId,
-      status: response.status,
-      detail: message,
-    });
-    return { method, ok: false, status: response.status, detail: message };
+    // A tokenizer without an installed template may throw here.
   }
 
-  const value = object(parsed);
-  let count: number | undefined;
-  if (method === "chat_render") {
-    if (Array.isArray(value?.token_ids)) count = value.token_ids.length;
-  } else {
-    if (typeof value?.count === "number" && Number.isSafeInteger(value.count) && value.count >= 0) {
-      count = value.count;
-    } else if (Array.isArray(value?.tokens)) {
-      count = value.tokens.length;
+  if (typeof tokenizer.chat_template === "string") return Boolean(tokenizer.chat_template.trim());
+  return Array.isArray(tokenizer.chat_template) && tokenizer.chat_template.length > 0;
+}
+
+async function fetchTokenizerAsset(
+  repository: string,
+  revision: string,
+  filename: string,
+): Promise<string | null> {
+  const response = await fetch(
+    `https://huggingface.co/${repository}/resolve/${encodeURIComponent(revision)}/${filename}`,
+    {
+      headers: { "user-agent": "ai-relay/1.0" },
+      signal: AbortSignal.timeout(TOKENIZER_ASSET_TIMEOUT_MS),
+    },
+  );
+  if (response.status === 404) return null;
+  if (!response.ok) {
+    throw new Error(
+      `Hugging Face tokenizer asset ${repository}/${filename} returned HTTP ${response.status}.`,
+    );
+  }
+  return response.text();
+}
+
+async function ensureChatTemplate(
+  tokenizer: ChatTemplateTokenizer,
+  spec: Extract<NvidiaTokenizerSpec, { kind: "huggingface" }>,
+): Promise<void> {
+  if (hasChatTemplate(tokenizer)) return;
+
+  const revision = spec.revision ?? "main";
+  const jinja = await fetchTokenizerAsset(spec.repository, revision, "chat_template.jinja");
+  if (jinja?.trim()) {
+    Reflect.set(tokenizer, "chat_template", jinja);
+    return;
+  }
+
+  const jsonText = await fetchTokenizerAsset(spec.repository, revision, "chat_template.json");
+  if (jsonText) {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(jsonText) as unknown;
+    } catch {
+      throw new Error(
+        `Hugging Face tokenizer ${spec.repository} returned invalid chat_template.json.`,
+      );
+    }
+
+    const value = typeof parsed === "object" && parsed !== null
+      ? Reflect.get(parsed, "chat_template")
+      : undefined;
+    const template = value ?? parsed;
+    if (
+      (typeof template === "string" && template.trim())
+      || (Array.isArray(template) && template.length > 0)
+    ) {
+      Reflect.set(tokenizer, "chat_template", template);
+      return;
     }
   }
 
-  if (count === undefined) {
-    const message = method === "chat_render"
-      ? "Render response did not contain token_ids."
-      : "Tokenize response did not contain a valid count or tokens array.";
-    log("warn", `nvidia_tokenizer_probe_${method}_failed`, {
-      provider: "nvidia",
-      relay_model: relayModelId,
-      status: response.status,
-      detail: message,
-    });
-    return { method, ok: false, status: response.status, detail: message };
+  throw new Error(
+    `Hugging Face tokenizer ${spec.repository} does not expose a usable chat template.`,
+  );
+}
+
+function loadHuggingFaceTokenizer(
+  spec: Extract<NvidiaTokenizerSpec, { kind: "huggingface" }>,
+): Promise<ChatTemplateTokenizer> {
+  const key = tokenizerCacheKey(spec);
+  const cached = huggingFaceTokenizerCache.get(key);
+  if (cached) return cached;
+
+  const pending = (async () => {
+    // Keep the current GPT-OSS path lightweight: Transformers.js and remote
+    // tokenizer assets are loaded only after an HF-backed model is enabled.
+    const { AutoTokenizer } = await import("@huggingface/transformers");
+    const tokenizer = await AutoTokenizer.from_pretrained(spec.repository, {
+      revision: spec.revision ?? "main",
+    }) as unknown as ChatTemplateTokenizer;
+    await ensureChatTemplate(tokenizer, spec);
+    return tokenizer;
+  })().catch((error) => {
+    huggingFaceTokenizerCache.delete(key);
+    throw error;
+  });
+
+  huggingFaceTokenizerCache.set(key, pending);
+  return pending;
+}
+
+function tokenLength(value: unknown): number | null {
+  if (Array.isArray(value)) return value.length;
+  if (ArrayBuffer.isView(value)) {
+    const length = Reflect.get(value, "length");
+    return typeof length === "number" ? length : null;
   }
 
-  log("info", `nvidia_tokenizer_probe_${method}_success`, {
-    provider: "nvidia",
-    relay_model: relayModelId,
-    input_tokens: count,
+  if (typeof value !== "object" || value === null) return null;
+  const inputIds = Reflect.get(value, "input_ids");
+  if (inputIds !== undefined) return tokenLength(inputIds);
+  return null;
+}
+
+function messages(body: ChatCompletionRequest): unknown[] {
+  if (!Array.isArray(body.messages)) {
+    throw new Error("NVIDIA token counting requires an OpenAI-style messages array.");
+  }
+  return body.messages;
+}
+
+function tools(body: ChatCompletionRequest): unknown[] | undefined {
+  return Array.isArray(body.tools) ? body.tools : undefined;
+}
+
+function chatTemplateKwargs(body: ChatCompletionRequest): Record<string, unknown> {
+  const value = body.chat_template_kwargs;
+  const options = typeof value === "object" && value !== null && !Array.isArray(value)
+    ? { ...value as Record<string, unknown> }
+    : {};
+
+  // Some NVIDIA/vLLM chat endpoints expose reasoning effort as a top-level
+  // OpenAI-style field while the model's Jinja template consumes the same name.
+  if (body.reasoning_effort !== undefined && options.reasoning_effort === undefined) {
+    options.reasoning_effort = body.reasoning_effort;
+  }
+  return options;
+}
+
+function countGptOss20b(body: ChatCompletionRequest): number {
+  if (!countGptOss20bChatCompletionTokens) {
+    throw new Error("gpt-tokenizer does not expose chat-completion counting for gpt-oss-20b.");
+  }
+
+  const count = countGptOss20bChatCompletionTokens({
+    ...body,
+    model: "gpt-oss-20b",
+  } as never);
+
+  if (!Number.isSafeInteger(count) || count < 0) {
+    throw new Error(`gpt-tokenizer returned an invalid GPT-OSS token count: ${count}`);
+  }
+  return count;
+}
+
+async function countHuggingFaceChat(
+  body: ChatCompletionRequest,
+  spec: Extract<NvidiaTokenizerSpec, { kind: "huggingface" }>,
+): Promise<number> {
+  const tokenizer = await loadHuggingFaceTokenizer(spec);
+  const requestTools = tools(body);
+  const requestDocuments = Array.isArray(body.documents) ? body.documents : undefined;
+
+  const rendered = tokenizer.apply_chat_template(messages(body), {
+    ...chatTemplateKwargs(body),
+    tokenize: true,
+    return_tensor: false,
+    return_dict: false,
+    add_generation_prompt: true,
+    ...(requestTools ? { tools: requestTools } : {}),
+    ...(requestDocuments ? { documents: requestDocuments } : {}),
   });
-  return { method, ok: true, count, status: response.status };
+
+  const count = tokenLength(rendered);
+  if (count === null || !Number.isSafeInteger(count) || count < 0) {
+    throw new Error(
+      `Hugging Face tokenizer ${spec.repository} returned an unsupported tokenized result.`,
+    );
+  }
+  return count;
 }
 
 export async function countNvidiaInputTokens(
   body: ChatCompletionRequest,
-  relayModelId: string,
-  upstreamModel: string,
-  apiKey: string,
-): Promise<NvidiaTokenCountResult> {
-  const payload = tokenizerPayload(body, upstreamModel);
-  const [render, tokenize] = await Promise.all([
-    postProbe("/v1/chat/completions/render", payload, apiKey, "chat_render", relayModelId),
-    postProbe("/tokenize", payload, apiKey, "tokenize", relayModelId),
-  ]);
-
-  if (render.ok && tokenize.ok) {
-    if (render.count !== tokenize.count) {
-      log("warn", "nvidia_tokenizer_probe_mismatch", {
-        provider: "nvidia",
-        relay_model: relayModelId,
-        chat_render_tokens: render.count,
-        tokenize_tokens: tokenize.count,
-        selected_method: "chat_render",
-      });
-    } else {
-      log("info", "nvidia_tokenizer_probe_agreement", {
-        provider: "nvidia",
-        relay_model: relayModelId,
-        input_tokens: render.count,
-      });
-    }
-    return { count: render.count!, method: "chat_render" };
+  tokenizer: NvidiaTokenizerSpec,
+): Promise<number> {
+  switch (tokenizer.kind) {
+    case "gpt-oss-20b":
+      return countGptOss20b(body);
+    case "huggingface":
+      return countHuggingFaceChat(body, tokenizer);
   }
-
-  if (render.ok) return { count: render.count!, method: "chat_render" };
-  if (tokenize.ok) return { count: tokenize.count!, method: "tokenize" };
-
-  throw new Error(
-    `NVIDIA hosted token counting is unavailable for ${relayModelId}: `
-    + `chat_render=${render.status ?? "network"} ${render.detail ?? "unknown error"}; `
-    + `tokenize=${tokenize.status ?? "network"} ${tokenize.detail ?? "unknown error"}`,
-  );
 }
