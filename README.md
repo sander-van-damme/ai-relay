@@ -109,9 +109,11 @@ There is no relay authentication. The service binds to `0.0.0.0`, so any machine
 
 ### Observability
 
-Open `http://<server-lan-ip>:8787/observability` for a dependency-free dashboard that refreshes every five seconds. Its counters cover only the lifetime of the current server process and reset on restart. They distinguish completed client requests, terminal request failures, client cancellations, and individual upstream attempts that failed before failover. Token totals use each selected provider offer's authoritative input count and provider-reported output/total usage when available. Provider and concrete-model rows include zero-count registered routes and their live configuration, activity, and cooldown state. The requested-model table distinguishes `auto` from every explicitly requested model.
+Open `http://<server-lan-ip>:8787/observability` for a dependency-free dashboard that refreshes automatically. Its counters cover only the lifetime of the current server process and reset on restart. Observability follows the same provider abstraction as the scheduler: it may record relay-generated facts and values that cross the generic `Provider` interface, but it must not inspect concrete provider implementations or add logging-only provider hooks.
 
-The **Download logs** button downloads `/observability/logs`, a JSONL file containing exactly the structured log events emitted since this process started. It observes the configured `LOG_LEVEL` and the same redaction as console/journald logging; it does not query journald or retain an unlimited in-memory history.
+The dashboard and `/observability/stats` expose queue depth, requests, successes, terminal failures, cancellations, upstream attempts, failed attempts, authoritative input-token totals, provider-reported output/total usage when available, provider state, called-model statistics, the full registered model catalog from `listModels()`, live model activity/cooldowns from `status()`, and requested-model counts that distinguish `auto` from explicit model requests. Registered models and called models are separate views so an available route is not confused with a route that has actually handled traffic.
+
+The **Download logs** button downloads `/observability/logs`, a JSONL file containing exactly the structured log events emitted since this process started. It observes the configured `LOG_LEVEL` and the same redaction as console/journald logging; it does not query journald or retain an unlimited in-memory history. Successful `request_complete` events include the selected offer's input count/capacity and generic output/total usage when the provider returns it through `ProviderExecutionResult.usage`.
 
 ## Configuration
 

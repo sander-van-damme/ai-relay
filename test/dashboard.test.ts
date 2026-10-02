@@ -2,12 +2,17 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { OBSERVABILITY_HTML } from "../src/dashboard.ts";
 
-test("observability dashboard only renders called-model outcome stats", () => {
+test("observability dashboard renders relay and generic provider-contract data", () => {
+  assert.match(OBSERVABILITY_HTML, /Providers/);
   assert.match(OBSERVABILITY_HTML, /Called models/);
-  assert.match(OBSERVABILITY_HTML, /Model calls/);
-  assert.match(OBSERVABILITY_HTML, /Successful calls/);
-  assert.match(OBSERVABILITY_HTML, /Failed calls/);
-  assert.match(OBSERVABILITY_HTML, /\['Model','Calls','Successes','Failures'\]/);
-  assert.doesNotMatch(OBSERVABILITY_HTML, /<h2>Providers<\/h2>/);
-  assert.doesNotMatch(OBSERVABILITY_HTML, /<h2>Requested models<\/h2>/);
+  assert.match(OBSERVABILITY_HTML, /Registered models/);
+  assert.match(OBSERVABILITY_HTML, /Requested models/);
+  assert.match(OBSERVABILITY_HTML, /Input tokens/);
+  assert.match(OBSERVABILITY_HTML, /Output tokens/);
+  assert.match(OBSERVABILITY_HTML, /Total tokens/);
+  assert.match(OBSERVABILITY_HTML, /Input capacity/);
+  assert.match(OBSERVABILITY_HTML, /Terminal failures/);
+  assert.match(OBSERVABILITY_HTML, /Cancellations/);
+  assert.match(OBSERVABILITY_HTML, /Failed attempts/);
+  assert.match(OBSERVABILITY_HTML, /registered_models/);
 });
