@@ -54,8 +54,8 @@ function assertOptimized(value: Record<string, unknown>): void {
   assert.deepEqual(value.tool_output, { max_lines: 1000, max_bytes: 32768 });
   const compaction = value.compaction as Record<string, unknown>;
   assert.equal(compaction.auto, true);
-  assert.deepEqual(compaction.keep, { tokens: 15000 });
-  assert.equal(compaction.buffer, 20000);
+  assert.deepEqual(compaction.keep, { tokens: 3000 });
+  assert.equal(compaction.buffer, 4000);
   assert.deepEqual(value.agents, { title: { disabled: true } });
   assert.deepEqual(value.permission, { skill: "deny" });
 }
@@ -91,10 +91,43 @@ test("merges nested compaction settings instead of replacing them", () => {
   const value = parseJsonc(applyOptimizations('{ "compaction": { "prune": true, "keep": { "messages": 4 } } }').text);
   assert.deepEqual(value.compaction, {
     prune: true,
-    keep: { messages: 4, tokens: 15000 },
+    keep: { messages: 4, tokens: 3000 },
     auto: true,
-    buffer: 20000,
+    buffer: 4000,
   });
+});
+
+test("sets a conservative working envelope for an existing relay auto model", () => {
+  const original = `{
+  "provider": {
+    "relay": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "relay",
+      "models": {
+        "auto": {
+          "name": "auto"
+        }
+      }
+    }
+  }
+}\n`;
+  const value = parseJsonc(applyOptimizations(original).text);
+  const provider = value.provider as Record<string, unknown>;
+  const relay = provider.relay as Record<string, unknown>;
+  const models = relay.models as Record<string, unknown>;
+  const auto = models.auto as Record<string, unknown>;
+  assert.equal(relay.npm, "@ai-sdk/openai-compatible");
+  assert.equal(auto.name, "auto");
+  assert.deepEqual(auto.limit, {
+    context: 18000,
+    input: 18000,
+    output: 4000,
+  });
+});
+
+test("does not create a relay provider solely for compaction limits", () => {
+  const value = parseJsonc(applyOptimizations("{}\n").text);
+  assert.equal(value.provider, undefined);
 });
 
 test("preserves existing agents", () => {
