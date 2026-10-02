@@ -407,7 +407,12 @@ export class RelayScheduler {
       relay_model: choice.offer.modelId,
       provider: choice.offer.providerId,
       offer_kind: choice.offer.kind,
+      provider_priority: choice.offer.providerPriority,
       input_tokens: choice.offer.inputTokens,
+      input_capacity_tokens: choice.offer.inputCapacityTokens,
+      available_at: Number.isFinite(choice.offer.availableAt)
+        ? new Date(choice.offer.availableAt).toISOString()
+        : null,
       queue_ms: now - job.enqueuedAt,
       queue_bypasses: job.bypassCount,
       failure_count: job.failureCount,
@@ -620,11 +625,18 @@ export class RelayScheduler {
       if (job.cancelled) return;
       const usage = await result.usage?.catch(() => undefined);
       this.observability.success(provider.id, offer.modelId, offer.inputTokens, usage);
+      const totalTokens = usage?.totalTokens
+        ?? (usage?.outputTokens !== undefined ? offer.inputTokens + usage.outputTokens : undefined);
       log("info", "request_complete", {
         request_id: job.id,
         relay_model: offer.modelId,
         provider: provider.id,
         offer_kind: offer.kind,
+        provider_priority: offer.providerPriority,
+        input_tokens: offer.inputTokens,
+        input_capacity_tokens: offer.inputCapacityTokens,
+        output_tokens: usage?.outputTokens ?? null,
+        total_tokens: totalTokens ?? null,
         failovers: job.failureCount,
         total_ms: Date.now() - job.enqueuedAt,
       });
