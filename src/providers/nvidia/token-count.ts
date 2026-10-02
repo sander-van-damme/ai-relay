@@ -157,9 +157,16 @@ function tools(body: ChatCompletionRequest): unknown[] | undefined {
 
 function chatTemplateKwargs(body: ChatCompletionRequest): Record<string, unknown> {
   const value = body.chat_template_kwargs;
-  return typeof value === "object" && value !== null && !Array.isArray(value)
-    ? value as Record<string, unknown>
+  const options = typeof value === "object" && value !== null && !Array.isArray(value)
+    ? { ...value as Record<string, unknown> }
     : {};
+
+  // Some NVIDIA/vLLM chat endpoints expose reasoning effort as a top-level
+  // OpenAI-style field while the model's Jinja template consumes the same name.
+  if (body.reasoning_effort !== undefined && options.reasoning_effort === undefined) {
+    options.reasoning_effort = body.reasoning_effort;
+  }
+  return options;
 }
 
 function countGptOss20b(body: ChatCompletionRequest): number {
@@ -180,6 +187,7 @@ async function countHuggingFaceChat(
 ): Promise<number> {
   const tokenizer = await loadHuggingFaceTokenizer(spec);
   const requestTools = tools(body);
+  const requestDocuments = Array.isArray(body.documents) ? body.documents : undefined;
 
   const rendered = tokenizer.apply_chat_template(messages(body), {
     ...chatTemplateKwargs(body),
@@ -188,6 +196,7 @@ async function countHuggingFaceChat(
     return_dict: false,
     add_generation_prompt: true,
     ...(requestTools ? { tools: requestTools } : {}),
+    ...(requestDocuments ? { documents: requestDocuments } : {}),
   });
 
   const count = tokenLength(rendered);
