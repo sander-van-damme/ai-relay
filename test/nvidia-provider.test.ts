@@ -161,6 +161,7 @@ test("NVIDIA successful execution calls chat completions and releases concurrenc
   const restoreKey = installKey();
   const originalFetch = globalThis.fetch;
   let calls = 0;
+  let expectedPromptTokens = 0;
   globalThis.fetch = async (input, init) => {
     const url = String(input);
     calls += 1;
@@ -169,7 +170,7 @@ test("NVIDIA successful execution calls chat completions and releases concurrenc
     assert.equal(request.model, "openai/gpt-oss-20b");
     return jsonResponse({
       choices: [],
-      usage: { prompt_tokens: offerResult.status === "offer" ? offerResult.offer.inputTokens : 0, completion_tokens: 5, total_tokens: 7 },
+      usage: { prompt_tokens: expectedPromptTokens, completion_tokens: 5, total_tokens: expectedPromptTokens + 5 },
     });
   };
 
@@ -178,6 +179,7 @@ test("NVIDIA successful execution calls chat completions and releases concurrenc
     const offerResult = await provider.getBestOffer(baseRequest, Date.now());
     assert.equal(offerResult.status, "offer");
     if (offerResult.status !== "offer") return;
+    expectedPromptTokens = offerResult.offer.inputTokens;
 
     const result = await provider.execute(
       offerResult.offer,
@@ -189,7 +191,7 @@ test("NVIDIA successful execution calls chat completions and releases concurrenc
     if (result.status !== "success") return;
 
     assert.equal(calls, 1);
-    assert.deepEqual(await result.usage, { outputTokens: 5, totalTokens: 7 });
+    assert.deepEqual(await result.usage, { outputTokens: 5, totalTokens: expectedPromptTokens + 5 });
     assert.equal(provider.status().models[0]?.active, 1);
     result.release();
     assert.equal(provider.status().models[0]?.active, 0);
