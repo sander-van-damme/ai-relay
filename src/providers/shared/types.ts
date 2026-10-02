@@ -59,11 +59,18 @@ export interface ProviderStatus {
 
 export type ProviderFailureScope = "provider" | "model";
 
+export interface ProviderUsage {
+  outputTokens?: number;
+  totalTokens?: number;
+}
+
 export type ProviderExecutionResult =
   | {
       status: "success";
       response: Response;
       release: () => void;
+      /** Resolves after a streaming response completes. Counts must come from the provider. */
+      usage?: Promise<ProviderUsage | undefined>;
     }
   | {
       status: "retryable";

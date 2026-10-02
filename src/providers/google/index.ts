@@ -23,6 +23,7 @@ import type {
   ProviderOffer,
   ProviderOfferResult,
   ProviderStatus,
+  ProviderUsage,
 } from "../shared/types.ts";
 import {
   hasAssistantToolCallsFrom,
@@ -441,6 +442,17 @@ function sse(value: unknown): Uint8Array {
 function streamIncludesUsage(body: ChatCompletionRequest): boolean {
   const options = object(body.stream_options);
   return options?.include_usage === true;
+}
+
+function observedUsage(rawUsage: unknown, generated: boolean): ProviderUsage | undefined {
+  const usage = object(rawUsage);
+  if (!usage) return undefined;
+  const output = generated ? usage.candidatesTokenCount : usage.total_output_tokens;
+  const total = generated ? usage.totalTokenCount : usage.total_tokens;
+  return {
+    ...(typeof output === "number" ? { outputTokens: output } : {}),
+    ...(typeof total === "number" ? { totalTokens: total } : {}),
+  };
 }
 
 function statusCode(error: unknown): number | undefined {
@@ -1013,9 +1025,11 @@ export class GoogleProvider implements Provider {
     offer: ProviderOffer,
     body: ChatCompletionRequest,
     upstreamTarget: string,
-  ): Response {
+  ): { response: Response; usage: Promise<ProviderUsage | undefined> } {
     const encoder = new TextEncoder();
     const provider = this;
+    let resolveUsage!: (usage: ProviderUsage | undefined) => void;
+    const usage = new Promise<ProviderUsage | undefined>((resolve) => { resolveUsage = resolve; });
     const output = new ReadableStream<Uint8Array>({
       async start(controller) {
         let interactionId = "google";
@@ -1136,6 +1150,7 @@ export class GoogleProvider implements Provider {
               continue;
             }
             if (event.event_type === "error") {
+              resolveUsage(undefined);
               controller.enqueue(sse({ error: event.error ?? { message: "Google interaction stream failed." } }));
               controller.enqueue(sse("[DONE]"));
               controller.close();
@@ -1144,6 +1159,7 @@ export class GoogleProvider implements Provider {
           }
 
           emit({}, finishReason(finalStatus, sawToolCall));
+          resolveUsage(observedUsage(finalUsage, false));
           if (streamIncludesUsage(body)) {
             controller.enqueue(encoder.encode(`data: ${JSON.stringify({
               id: `chatcmpl-${interactionId}`,
@@ -1157,18 +1173,19 @@ export class GoogleProvider implements Provider {
           controller.enqueue(sse("[DONE]"));
           controller.close();
         } catch (error) {
+          resolveUsage(undefined);
           controller.error(error);
         }
       },
     });
 
-    return new Response(output, {
+    return { response: new Response(output, {
       status: 200,
       headers: {
         "content-type": "text/event-stream; charset=utf-8",
         "cache-control": "no-cache",
       },
-    });
+    }), usage };
   }
 
   private openAIGenerateStream(
@@ -1177,9 +1194,11 @@ export class GoogleProvider implements Provider {
     body: ChatCompletionRequest,
     requestContents: Content[],
     upstreamTarget: string,
-  ): Response {
+  ): { response: Response; usage: Promise<ProviderUsage | undefined> } {
     const encoder = new TextEncoder();
     const provider = this;
+    let resolveUsage!: (usage: ProviderUsage | undefined) => void;
+    const usage = new Promise<ProviderUsage | undefined>((resolve) => { resolveUsage = resolve; });
     const output = new ReadableStream<Uint8Array>({
       async start(controller) {
         let responseId = "google";
@@ -1286,6 +1305,7 @@ export class GoogleProvider implements Provider {
                 ? "content_filter"
                 : "stop";
           emit({}, finish);
+          resolveUsage(observedUsage(finalUsage, true));
 
           if (streamIncludesUsage(body)) {
             controller.enqueue(encoder.encode(`data: ${JSON.stringify({
@@ -1300,18 +1320,19 @@ export class GoogleProvider implements Provider {
           controller.enqueue(sse("[DONE]"));
           controller.close();
         } catch (error) {
+          resolveUsage(undefined);
           controller.error(error);
         }
       },
     });
 
-    return new Response(output, {
+    return { response: new Response(output, {
       status: 200,
       headers: {
         "content-type": "text/event-stream; charset=utf-8",
         "cache-control": "no-cache",
       },
-    });
+    }), usage };
   }
 
   private classifyFailure(offer: ProviderOffer, model: GoogleModel, error: unknown): ProviderExecutionResult {
@@ -1398,6 +1419,7 @@ export class GoogleProvider implements Provider {
       const continuation = plan.continuation;
       const client = this.googleClient();
       let response: Response;
+      let usage: Promise<ProviderUsage | undefined> | undefined;
 
       if (plan.transport === "generate-content") {
         const request: GoogleGenerateContentRequest = toGoogleGenerateContentRequest(
@@ -1413,13 +1435,15 @@ export class GoogleProvider implements Provider {
 
         if (stream) {
           const result = await client.models.generateContentStream(request as any);
-          response = this.openAIGenerateStream(
+          const streamed = this.openAIGenerateStream(
             result as unknown as AsyncIterable<unknown>,
             offer,
             body,
             request.contents,
             target,
           );
+          response = streamed.response;
+          usage = streamed.usage;
         } else {
           const result = await client.models.generateContent(request as any);
           this.rememberGenerateContinuation(body, result, request.contents, target);
@@ -1427,6 +1451,7 @@ export class GoogleProvider implements Provider {
             status: 200,
             headers: { "content-type": "application/json; charset=utf-8" },
           });
+          usage = Promise.resolve(observedUsage((object(result) ?? {}).usageMetadata, true));
         }
       } else {
         const request: GoogleInteractionRequest = toGoogleInteractionRequest(
@@ -1444,7 +1469,9 @@ export class GoogleProvider implements Provider {
         const result = await client.interactions.create(interactionRequest as any, { fetchOptions: { signal } } as any);
 
         if (stream) {
-          response = this.openAIStream(result as unknown as AsyncIterable<unknown>, offer, body, target);
+          const streamed = this.openAIStream(result as unknown as AsyncIterable<unknown>, offer, body, target);
+          response = streamed.response;
+          usage = streamed.usage;
         } else {
           const interaction = result as unknown;
           const value = object(interaction);
@@ -1462,6 +1489,7 @@ export class GoogleProvider implements Provider {
             status: 200,
             headers: { "content-type": "application/json; charset=utf-8" },
           });
+          usage = Promise.resolve(observedUsage(value?.usage, false));
         }
       }
 
@@ -1481,6 +1509,7 @@ export class GoogleProvider implements Provider {
       return {
         status: "success",
         response,
+        usage,
         release: () => {
           if (released) return;
           released = true;

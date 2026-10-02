@@ -10,6 +10,7 @@ import {
   type ProviderOfferResult,
 } from "./providers/index.ts";
 import type { RelayConfig, RelayJob } from "./types.ts";
+import { Observability } from "./observability.ts";
 
 const MAX_QUEUE_BYPASSES = 8;
 export const INITIAL_OPTIMIZATION_WAIT_MS = 15_000;
@@ -112,6 +113,7 @@ export class RelayScheduler {
   readonly config: RelayConfig;
   readonly queue: RelayJob[] = [];
   readonly providers: readonly Provider[];
+  readonly observability: Observability;
   private readonly providerById: Map<string, Provider>;
   private timer?: NodeJS.Timeout;
   private draining = false;
@@ -119,6 +121,7 @@ export class RelayScheduler {
   constructor(config: RelayConfig, providers: readonly Provider[] = createProviders()) {
     this.config = config;
     this.providers = providers;
+    this.observability = new Observability(providers);
     this.providerById = new Map(providers.map((provider) => [provider.id, provider]));
   }
 
@@ -132,6 +135,7 @@ export class RelayScheduler {
 
   enqueue(job: RelayJob): void {
     this.queue.push(job);
+    this.observability.request(job.requestedModel, this.queue.filter((queued) => !queued.cancelled).length);
     log("info", "queue_enqueued", {
       request_id: job.id,
       requested_model: job.requestedModel,
@@ -139,6 +143,10 @@ export class RelayScheduler {
       queue_depth: this.queue.length,
     });
     this.triggerDrain();
+  }
+
+  recordClientCancellation(): void {
+    this.observability.cancellation();
   }
 
   status(): Record<string, unknown> {
@@ -368,6 +376,7 @@ export class RelayScheduler {
     }
 
     const error = openAiError(code, message);
+    this.observability.terminalFailure();
     job.stream ? finishStreamError(job.response, error) : finishJson(job.response, error);
   }
 
@@ -537,6 +546,7 @@ export class RelayScheduler {
     timeout.unref();
 
     const startedAt = Date.now();
+    this.observability.attempt(provider.id, offer.modelId, offer.inputTokens);
     const result = await provider.execute(
       offer,
       job.body,
@@ -551,6 +561,7 @@ export class RelayScheduler {
     }
 
     if (result.status === "retryable") {
+      this.observability.failedAttempt(provider.id, offer.modelId);
       const retryCount = this.recordRetryableFailure(job, provider, offer, result);
       log("warn", "provider_retryable_failure", {
         request_id: job.id,
@@ -568,6 +579,7 @@ export class RelayScheduler {
     }
 
     if (result.status === "rejected") {
+      this.observability.failedAttempt(provider.id, offer.modelId);
       log("warn", "provider_rejected", {
         request_id: job.id,
         relay_model: offer.modelId,
@@ -583,6 +595,7 @@ export class RelayScheduler {
         job.lastRetryFailure = undefined;
         this.markFailureAndRequeue(job);
       } else {
+        this.observability.terminalFailure(provider.id, offer.modelId);
         this.terminalForJob(job, result.httpStatus, result.bodyText);
       }
       return;
@@ -604,6 +617,9 @@ export class RelayScheduler {
         const text = await result.response.text();
         if (!job.cancelled && !job.response.writableEnded && !job.response.destroyed) job.response.end(text);
       }
+      if (job.cancelled) return;
+      const usage = await result.usage?.catch(() => undefined);
+      this.observability.success(provider.id, offer.modelId, offer.inputTokens, usage);
       log("info", "request_complete", {
         request_id: job.id,
         relay_model: offer.modelId,
@@ -614,6 +630,8 @@ export class RelayScheduler {
       });
     } catch (error) {
       if (!job.cancelled) {
+        this.observability.failedAttempt(provider.id, offer.modelId);
+        this.observability.terminalFailure(provider.id, offer.modelId);
         log("warn", "upstream_body_error", {
           request_id: job.id,
           relay_model: offer.modelId,

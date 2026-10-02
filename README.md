@@ -1,6 +1,6 @@
 # AI Relay
 
-AI Relay is a small local OpenAI-compatible Chat Completions relay. It exposes one endpoint on `127.0.0.1`, asks each configured provider for its best current offer, and keeps requests queued while capacity is temporarily unavailable.
+AI Relay is a small OpenAI-compatible Chat Completions relay for a trusted local network. It listens on all interfaces by default, asks each configured provider for its best current offer, and keeps requests queued while capacity is temporarily unavailable.
 
 Provider/model knowledge lives in TypeScript provider modules. Machine-specific configuration is limited to server settings and provider API keys.
 
@@ -87,12 +87,15 @@ AI Relay implements:
 GET  /health
 GET  /v1/models
 POST /v1/chat/completions
+GET  /observability
+GET  /observability/stats
+GET  /observability/logs
 ```
 
 Example:
 
 ```bash
-curl http://127.0.0.1:8787/v1/chat/completions \
+curl http://<server-lan-ip>:8787/v1/chat/completions \
   -H 'Content-Type: application/json' \
   -d '{
     "model": "auto",
@@ -102,7 +105,13 @@ curl http://127.0.0.1:8787/v1/chat/completions \
 
 For streaming, add `"stream": true`.
 
-There is no relay authentication. The service binds to `127.0.0.1` and is intended only for processes on the same machine. An `Authorization` header from a client is ignored.
+There is no relay authentication. The service binds to `0.0.0.0`, so any machine that can reach the server on the LAN can use `http://<server-lan-ip>:8787`. LAN exposure is intentional; restrict access using your network configuration if necessary. An `Authorization` header from a client is ignored.
+
+### Observability
+
+Open `http://<server-lan-ip>:8787/observability` for a dependency-free dashboard that refreshes every five seconds. Its counters cover only the lifetime of the current server process and reset on restart. They distinguish completed client requests, terminal request failures, client cancellations, and individual upstream attempts that failed before failover. Token totals use each selected provider offer's authoritative input count and provider-reported output/total usage when available. Provider and concrete-model rows include zero-count registered routes and their live configuration, activity, and cooldown state. The requested-model table distinguishes `auto` from every explicitly requested model.
+
+The **Download logs** button downloads `/observability/logs`, a JSONL file containing exactly the structured log events emitted since this process started. It observes the configured `LOG_LEVEL` and the same redaction as console/journald logging; it does not query journald or retain an unlimited in-memory history.
 
 ## Configuration
 
@@ -111,7 +120,7 @@ There is no relay authentication. The service binds to `127.0.0.1` and is intend
 ```json
 {
   "server": {
-    "host": "127.0.0.1",
+    "host": "0.0.0.0",
     "port": 8787,
     "heartbeatSeconds": 15,
     "upstreamTimeoutSeconds": 300,

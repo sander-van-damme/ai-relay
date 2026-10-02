@@ -137,7 +137,8 @@ async function main() {
   }
 
   const port = await readPort();
-  console.log(`AI Relay is installed and running at http://127.0.0.1:${port}`);
+  console.log(`AI Relay is installed and listening on all interfaces at port ${port}.`);
+  console.log(`Open http://<server-lan-ip>:${port}/observability from your LAN.`);
   console.log(`Provider secrets: ${envTarget}`);
   console.log("Logs: journalctl -u ai-relay -f");
 }

@@ -28,7 +28,7 @@ function numberValue(value: unknown, label: string, fallback: number, min: numbe
 function parseServer(value: unknown): ServerConfig {
   const raw = record(value ?? {}, "server");
   return {
-    host: stringValue(raw.host, "server.host", "127.0.0.1"),
+    host: stringValue(raw.host, "server.host", "0.0.0.0"),
     port: numberValue(raw.port, "server.port", 8787, 1, 65535),
     heartbeatSeconds: numberValue(raw.heartbeatSeconds, "server.heartbeatSeconds", 15, 1, 300),
     upstreamTimeoutSeconds: numberValue(raw.upstreamTimeoutSeconds, "server.upstreamTimeoutSeconds", 300, 1, 3600),

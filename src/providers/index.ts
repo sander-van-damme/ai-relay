@@ -17,4 +17,5 @@ export type {
   ProviderOfferKind,
   ProviderOfferResult,
   ProviderStatus,
+  ProviderUsage,
 } from "./shared/types.ts";

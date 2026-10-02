@@ -7,5 +7,10 @@ test("checked-in config contains only relay/server settings", async () => {
   const text = await readFile(new URL("../config/relay.json", import.meta.url), "utf8");
   const config = parseConfig(JSON.parse(text) as unknown);
   assert.equal(config.server.port, 8787);
+  assert.equal(config.server.host, "0.0.0.0");
   assert.doesNotMatch(text, /gemini|nvidia|requestsPerDay|inputTokensPerMinute|retrySeconds/);
+});
+
+test("server host defaults to all interfaces", () => {
+  assert.equal(parseConfig({}).server.host, "0.0.0.0");
 });
