@@ -123,7 +123,7 @@ export const NVIDIA_MODELS: readonly NvidiaModel[] = [
   {
     id: "nvidia/openai/gpt-oss-20b",
     upstreamModel: "openai/gpt-oss-20b",
-    contextWindowTokens: 128_000,
+    contextWindowTokens: 131_072,
     preference: 400,
     enabled: true,
     tokenizer: { kind: "gpt-oss-20b" },
@@ -142,7 +142,7 @@ export const NVIDIA_MODELS: readonly NvidiaModel[] = [
     contextWindowTokens: null,
     preference: 200,
     enabled: false,
-    tokenizer: { kind: "huggingface", repository: "osllmai-community/Llama-3.2-90B-Vision-Instruct" },
+    tokenizer: { kind: "huggingface", repository: "alpindale/Llama-3.2-90B-Vision-Instruct" },
   },
   {
     id: "nvidia/meta/llama-3.2-11b-vision-instruct",
@@ -150,7 +150,7 @@ export const NVIDIA_MODELS: readonly NvidiaModel[] = [
     contextWindowTokens: null,
     preference: 100,
     enabled: false,
-    tokenizer: { kind: "huggingface", repository: "unsloth/Llama-3.2-11B-Vision-Instruct" },
+    tokenizer: { kind: "huggingface", repository: "alpindale/Llama-3.2-11B-Vision-Instruct" },
   },
 ];
 
