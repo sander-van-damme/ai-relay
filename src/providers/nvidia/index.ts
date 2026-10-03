@@ -559,7 +559,7 @@ class NvidiaProvider implements Provider {
       return {
         status: "success",
         response,
-        ...(usage ? { usage } : {}),
+        usage,
         release: () => {
           if (released) return;
           released = true;
