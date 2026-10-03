@@ -26,6 +26,25 @@ const TEST_MODEL: GoogleModel = {
   },
 };
 
+const ANTIGRAVITY_MODEL: GoogleModel = {
+  id: "google/antigravity-preview-09-2026",
+  upstreamModel: "gemini-3.8-flash",
+  upstreamAgent: "antigravity-preview-09-2026",
+  contextWindowTokens: 1_048_576,
+  quota: {
+    maxConcurrent: null,
+    dailyWindow: { type: "calendar-day", timeZone: "America/Los_Angeles" },
+    limits: {
+      requestsPerMinute: 60,
+      inputTokensPerMinute: 100_000,
+      requestsPerDay: 100,
+      minimumSpacingMs: 0,
+    },
+  },
+  preference: 1_200,
+  transport: "interactions",
+};
+
 const standardRequest = {
   offerKind: "standard" as const,
   body: { messages: [{ role: "user", content: "Hello" }] },
@@ -82,7 +101,6 @@ function completedInteraction(id: string, text = "Hello back", environmentId?: s
 test("Google catalog contains eligible routes and excludes retired models", () => {
   assert.deepEqual(GOOGLE_MODELS.map((model) => model.id), [
     "google/gemini-3.8-flash",
-    "google/antigravity-preview-09-2026",
     "google/gemini-3.7-flash",
     "google/gemini-3.6-flash",
     "google/gemini-3.5-flash",
@@ -93,8 +111,9 @@ test("Google catalog contains eligible routes and excludes retired models", () =
     "google/gemma-4-31b-it",
     "google/gemma-4-26b-a4b-it",
   ]);
+  assert.equal(GOOGLE_MODELS.some((model) => model.id === ANTIGRAVITY_MODEL.id), false);
 
-  const antigravity = GOOGLE_MODELS.find((model) => model.id === "google/antigravity-preview-09-2026")!;
+  const antigravity = ANTIGRAVITY_MODEL;
   assert.equal(antigravity.upstreamAgent, "antigravity-preview-09-2026");
   assert.equal(antigravity.upstreamModel, "gemini-3.8-flash");
   assert.equal(antigravity.contextWindowTokens, 1_048_576);
@@ -277,7 +296,7 @@ test("Google execution uses the official Interactions API and reuses stored cont
 test("Antigravity uses the agent API with Search and caller-provided functions only", async () => {
   const originalKey = process.env.GEMINI_API_KEY;
   process.env.GEMINI_API_KEY = "test";
-  const antigravity = GOOGLE_MODELS.find((model) => model.id === "google/antigravity-preview-09-2026")!;
+  const antigravity = ANTIGRAVITY_MODEL;
   const requests: Array<Record<string, unknown>> = [];
   const countRequests: Array<Record<string, unknown>> = [];
   let call = 0;
@@ -396,7 +415,7 @@ test("Antigravity uses the agent API with Search and caller-provided functions o
 test("Antigravity keeps native tool-call continuations stateful", async () => {
   const originalKey = process.env.GEMINI_API_KEY;
   process.env.GEMINI_API_KEY = "test";
-  const antigravity = GOOGLE_MODELS.find((model) => model.id === "google/antigravity-preview-09-2026")!;
+  const antigravity = ANTIGRAVITY_MODEL;
   const requests: Array<Record<string, unknown>> = [];
   let call = 0;
 
@@ -487,7 +506,7 @@ test("Antigravity keeps native tool-call continuations stateful", async () => {
 test("Antigravity bootstraps external tool history as text, then resumes statefully", async () => {
   const originalKey = process.env.GEMINI_API_KEY;
   process.env.GEMINI_API_KEY = "test";
-  const antigravity = GOOGLE_MODELS.find((model) => model.id === "google/antigravity-preview-09-2026")!;
+  const antigravity = ANTIGRAVITY_MODEL;
   const requests: Array<Record<string, unknown>> = [];
   const countInputs: Array<Record<string, unknown>> = [];
   let call = 0;
@@ -693,7 +712,7 @@ test("Gemini replays external tool history through GenerateContent and keeps nat
 test("Antigravity still overrides default tools when the caller provides no functions", async () => {
   const originalKey = process.env.GEMINI_API_KEY;
   process.env.GEMINI_API_KEY = "test";
-  const antigravity = GOOGLE_MODELS.find((model) => model.id === "google/antigravity-preview-09-2026")!;
+  const antigravity = ANTIGRAVITY_MODEL;
   const requests: Array<Record<string, unknown>> = [];
 
   try {
@@ -730,7 +749,7 @@ test("Antigravity still overrides default tools when the caller provides no func
 test("Antigravity streaming captures environment state for the next turn", async () => {
   const originalKey = process.env.GEMINI_API_KEY;
   process.env.GEMINI_API_KEY = "test";
-  const antigravity = GOOGLE_MODELS.find((model) => model.id === "google/antigravity-preview-09-2026")!;
+  const antigravity = ANTIGRAVITY_MODEL;
   const requests: Array<Record<string, unknown>> = [];
   let call = 0;
 
