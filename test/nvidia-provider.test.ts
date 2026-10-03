@@ -31,12 +31,12 @@ function installKey(): () => void {
   };
 }
 
-test("NVIDIA catalog preserves all candidates, tokenizer specs, and only enables GPT-OSS", () => {
+test("NVIDIA catalog exposes all candidates with tokenizer specs and capacities", () => {
   assert.equal(NVIDIA_MODELS.length, 15);
-  assert.deepEqual(
-    NVIDIA_MODELS.filter((model) => model.enabled).map((model) => model.id),
-    ["nvidia/openai/gpt-oss-20b"],
-  );
+  assert.ok(NVIDIA_MODELS.every((model) => model.enabled));
+  assert.ok(NVIDIA_MODELS.every(
+    (model) => typeof model.contextWindowTokens === "number" && model.contextWindowTokens > 0,
+  ));
   assert.ok(NVIDIA_MODELS.every((model) => model.tokenizer !== undefined));
   assert.equal(
     NVIDIA_MODELS.find((model) => model.id === "nvidia/openai/gpt-oss-20b")?.tokenizer.kind,
@@ -48,11 +48,11 @@ test("NVIDIA catalog preserves all candidates, tokenizer specs, and only enables
   );
 
   const provider = createNvidiaProvider();
-  assert.deepEqual(provider.listModels(), [{
-    id: "nvidia/openai/gpt-oss-20b",
-    providerId: "nvidia",
-    inputCapacityTokens: 131_072,
-  }]);
+  assert.equal(provider.listModels().length, NVIDIA_MODELS.length);
+  assert.deepEqual(
+    provider.listModels().map((model) => model.id),
+    NVIDIA_MODELS.map((model) => model.id),
+  );
 });
 
 test("NVIDIA requires an API key before evaluating offers", async () => {
@@ -100,11 +100,12 @@ test("NVIDIA offer evaluation for GPT-OSS does not make a network request", asyn
 
   try {
     const provider = createNvidiaProvider();
-    const first = await provider.getBestOffer(baseRequest, Date.now());
+    const gptOssRequest = { ...baseRequest, requestedModel: "nvidia/openai/gpt-oss-20b" };
+    const first = await provider.getBestOffer(gptOssRequest, Date.now());
     assert.equal(first.status, "offer");
     if (first.status === "offer") assert.ok(first.offer.inputTokens > 0);
 
-    const second = await provider.getBestOffer(baseRequest, Date.now());
+    const second = await provider.getBestOffer(gptOssRequest, Date.now());
     assert.equal(second.status, "offer");
     if (first.status === "offer" && second.status === "offer") {
       assert.equal(second.offer.inputTokens, first.offer.inputTokens);
@@ -129,7 +130,10 @@ test("NVIDIA treats 429 as model-scoped and respects Retry-After", async () => {
 
   try {
     const provider = createNvidiaProvider();
-    const offerResult = await provider.getBestOffer(baseRequest, Date.now());
+    const offerResult = await provider.getBestOffer({
+      ...baseRequest,
+      requestedModel: "nvidia/openai/gpt-oss-20b",
+    }, Date.now());
     assert.equal(offerResult.status, "offer");
     if (offerResult.status !== "offer") return;
 
@@ -148,7 +152,9 @@ test("NVIDIA treats 429 as model-scoped and respects Retry-After", async () => {
     }
 
     assert.equal(calls, 1);
-    const modelStatus = provider.status().models[0];
+    const modelStatus = provider.status().models.find(
+      (model) => model.id === "nvidia/openai/gpt-oss-20b",
+    );
     assert.ok((modelStatus?.blockedUntil ?? 0) >= failedAt + 2_000);
     assert.equal(provider.status().blockedUntil, null);
   } finally {
@@ -178,7 +184,10 @@ test("NVIDIA successful execution calls chat completions and releases concurrenc
 
   try {
     const provider = createNvidiaProvider();
-    const offerResult = await provider.getBestOffer(baseRequest, Date.now());
+    const offerResult = await provider.getBestOffer({
+      ...baseRequest,
+      requestedModel: "nvidia/openai/gpt-oss-20b",
+    }, Date.now());
     assert.equal(offerResult.status, "offer");
     if (offerResult.status !== "offer") return;
     expectedPromptTokens = offerResult.offer.inputTokens;
@@ -194,9 +203,9 @@ test("NVIDIA successful execution calls chat completions and releases concurrenc
 
     assert.equal(calls, 1);
     assert.deepEqual(await result.usage, { inputTokens: expectedPromptTokens, outputTokens: 5, totalTokens: expectedPromptTokens + 5 });
-    assert.equal(provider.status().models[0]?.active, 1);
+    assert.equal(provider.status().models.find((model) => model.id === "nvidia/openai/gpt-oss-20b")?.active, 1);
     result.release();
-    assert.equal(provider.status().models[0]?.active, 0);
+    assert.equal(provider.status().models.find((model) => model.id === "nvidia/openai/gpt-oss-20b")?.active, 0);
   } finally {
     globalThis.fetch = originalFetch;
     restoreKey();
@@ -246,6 +255,7 @@ test("NVIDIA streaming requests usage and preserves downstream SSE bytes", async
     const offerResult = await provider.getBestOffer({
       ...baseRequest,
       body: streamBody,
+      requestedModel: "nvidia/openai/gpt-oss-20b",
     }, Date.now());
     assert.equal(offerResult.status, "offer");
     if (offerResult.status !== "offer") return;
@@ -283,7 +293,7 @@ test("NVIDIA streaming requests usage and preserves downstream SSE bytes", async
     });
 
     result.release();
-    assert.equal(provider.status().models[0]?.active, 0);
+    assert.equal(provider.status().models.find((model) => model.id === "nvidia/openai/gpt-oss-20b")?.active, 0);
   } finally {
     globalThis.fetch = originalFetch;
     restoreKey();
@@ -306,7 +316,10 @@ test("NVIDIA streaming leaves usage unavailable when no usage event is returned"
 
   try {
     const provider = createNvidiaProvider();
-    const offerResult = await provider.getBestOffer(baseRequest, Date.now());
+    const offerResult = await provider.getBestOffer({
+      ...baseRequest,
+      requestedModel: "nvidia/openai/gpt-oss-20b",
+    }, Date.now());
     assert.equal(offerResult.status, "offer");
     if (offerResult.status !== "offer") return;
 
@@ -329,7 +342,7 @@ test("NVIDIA streaming leaves usage unavailable when no usage event is returned"
   }
 });
 
-test("NVIDIA does not expose disabled catalog models or speculative overflow offers", async () => {
+test("NVIDIA does not expose speculative overflow offers", async () => {
   const restoreKey = installKey();
   const originalFetch = globalThis.fetch;
   let calls = 0;
@@ -340,12 +353,7 @@ test("NVIDIA does not expose disabled catalog models or speculative overflow off
 
   try {
     const provider = createNvidiaProvider();
-    const disabled = await provider.getBestOffer({
-      ...baseRequest,
-      requestedModel: "nvidia/deepseek-ai/deepseek-v4.1-flash",
-    }, Date.now());
-    assert.equal(disabled.status, "no_offer");
-    if (disabled.status === "no_offer") assert.equal(disabled.reason, "no_eligible_model");
+    assert.equal(provider.listModels().length, 15);
 
     const overflow = await provider.getBestOffer({
       ...baseRequest,

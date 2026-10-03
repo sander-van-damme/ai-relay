@@ -4,13 +4,9 @@ The NVIDIA provider is implemented as an isolated provider using direct `fetch` 
 
 ## Current scope
 
-The source catalog contains the 15 general chat/text free-endpoint candidates selected for this relay, in coding-preference order. Only one model is enabled while the hosted transport and model behavior are being verified:
+The source catalog contains 15 general chat/text free-endpoint candidates selected for this relay, in coding-preference order. All 15 are enabled. Their upstream IDs and request capacities follow NVIDIA's hosted free-endpoint catalog: 1,048,576 tokens for the current DeepSeek, GLM, Kimi and long-context Nemotron entries; 262,144 tokens for Laguna XS 2.1, Gemma 4, DiffusionGemma and Nemotron 3 Nano Omni; and 131,072 tokens for Muse Glimmer, GPT-OSS 20B and the Llama 3.2 Vision entries.
 
-```text
-nvidia/openai/gpt-oss-20b
-```
-
-The remaining models stay in the NVIDIA source catalog with `enabled: false`. Their upstream IDs, context limits, request compatibility and local token counts must still be validated against NVIDIA before enabling them.
+NVIDIA's hosted catalog and endpoint behavior can change independently of this relay. Local token counting therefore remains provider-owned, and upstream `usage.prompt_tokens` continue to be checked against the local count so mismatches are visible in logs.
 
 NVIDIA does not currently have a hard-coded RPM, TPM, RPD, credit, or concurrency ceiling in the relay. A normal HTTP 429 is treated as model-scoped and triggers exponential model backoff. `Retry-After` is honored when present. Network failures, timeouts and 5xx responses are provider-scoped health failures. The relay does not infer an account-wide rate limit merely because several models are throttled.
 
@@ -51,11 +47,11 @@ Each NVIDIA catalog model carries its own tokenizer specification:
 
 GPT-OSS uses the lightweight local `gpt-tokenizer` implementation and does not need a network request during offer evaluation.
 
-The other tokenizer implementations use `@huggingface/transformers` and `AutoTokenizer.apply_chat_template()` with the request's messages, tools, `chat_template_kwargs`, and an assistant generation prompt. Transformers.js itself is dynamically imported only when an HF-backed model is evaluated. Tokenizer instances are lazy-loaded and cached per tokenizer repository. If a tokenizer does not expose an embedded template, the provider loads that repository's `chat_template.jinja` or `chat_template.json` once and installs it on the tokenizer. Because the other models are disabled, none of these assets are downloaded during normal operation yet. Enabling a model requires validating that this locally rendered count matches the NVIDIA deployment for representative plain-chat, tool-use, template-option and long-context requests.
+The other tokenizer implementations use `@huggingface/transformers` and `AutoTokenizer.apply_chat_template()` with the request's messages, tools, `chat_template_kwargs`, and an assistant generation prompt. Transformers.js itself is dynamically imported only when an HF-backed model is evaluated. Tokenizer instances are lazy-loaded and cached per tokenizer repository. If a tokenizer does not expose an embedded template, the provider loads that repository's `chat_template.jinja` or `chat_template.json` once and installs it on the tokenizer. Hugging Face-backed tokenizer assets are loaded lazily when their model is first evaluated and then cached. This means the first request that considers a newly used model can incur tokenizer download/load latency. Local counts are continuously checked against NVIDIA's reported prompt-token usage, which provides a hosted validation signal without disabling the model.
 
 Kimi K3 uses the Hugging Face staff-maintained standalone tokenizer repository because the original Kimi tokenizer historically required custom Python tokenizer code. The standalone repository supplies a normal tokenizer JSON and chat template usable from JavaScript.
 
-The Llama Vision models use the public `alpindale` mirrors because the official Meta repositories can require Hugging Face access approval. NVIDIA documents these VLMs as supporting text-only queries, but the mirror templates must still be checked against NVIDIA's hosted rendering before either model is enabled.
+The Llama Vision models use the public `alpindale` mirrors because the official Meta repositories can require Hugging Face access approval. NVIDIA documents these VLMs as supporting text-only queries; any local/hosted token-count differences are surfaced through the same runtime validation logs.
 
 Local counts are logged once per request/model as `nvidia_local_token_count`. For non-streaming responses that include OpenAI-style usage metadata, the provider compares NVIDIA's `usage.prompt_tokens` with the local count and logs either `nvidia_token_count_verified` or `nvidia_token_count_mismatch`. This gives us a direct hosted validation signal as models are enabled.
 
