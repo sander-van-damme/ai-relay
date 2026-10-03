@@ -249,12 +249,14 @@ function providerUsage(parsed: Usage | undefined): ProviderUsage | undefined {
 export class GroqProvider implements Provider {
   readonly id = "groq";
   readonly priority = 30;
+  private readonly models: readonly GroqModel[];
   private readonly states = new Map<string, GroqState>();
   private readonly tokenCountCache = new WeakMap<ChatCompletionRequest, Map<string, Promise<number>>>();
   private providerBlockedUntil = 0;
   private providerFailures = 0;
 
-  constructor(private readonly models: readonly GroqModel[] = GROQ_MODELS) {
+  constructor(models: readonly GroqModel[] = GROQ_MODELS) {
+    this.models = models;
     for (const model of models) this.states.set(model.id, { ...emptyQuotaState(), failures: 0 });
   }
 
