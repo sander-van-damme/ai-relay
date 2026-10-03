@@ -149,6 +149,52 @@ class FakeProvider implements Provider {
   }
 }
 
+
+class StreamingProvider extends FakeProvider {
+  releaseCount = 0;
+  lastSignal?: AbortSignal;
+  stall = false;
+
+  override async execute(
+    offer: ProviderOffer,
+    body: ChatCompletionRequest,
+    _stream: boolean,
+    signal: AbortSignal,
+  ): Promise<ProviderExecutionResult> {
+    const id = String(body.testId);
+    this.executionOrder.push(id);
+    this.executionKinds.push(offer.kind);
+    this.lastSignal = signal;
+
+    const encoder = new TextEncoder();
+    const stalled = this.stall;
+    const response = new Response(new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(encoder.encode('data: {"choices":[]}\\n\\n'));
+        if (!stalled) {
+          controller.enqueue(encoder.encode("data: [DONE]\\n\\n"));
+          controller.close();
+          return;
+        }
+        signal.addEventListener("abort", () => {
+          controller.error(signal.reason ?? new Error("aborted"));
+        }, { once: true });
+      },
+    }));
+
+    let released = false;
+    return {
+      status: "success",
+      response,
+      release: () => {
+        if (released) return;
+        released = true;
+        this.releaseCount += 1;
+      },
+    };
+  }
+}
+
 test("upstream rejection details extract structured errors and redact secrets", () => {
   assert.equal(
     upstreamRejectionDetail(JSON.stringify({
@@ -211,6 +257,63 @@ test("a failed old request yields one dispatch turn to a younger runnable reques
   a.cancelled = true;
 });
 
+
+
+test("stream keeps upstream abort controller until normal completion", async () => {
+  const provider = new StreamingProvider("stream", 10, 32_000);
+  const scheduler = new RelayScheduler(config(), [provider]);
+  const response = new FakeResponse();
+  const request = job("stream-normal", response);
+  request.stream = true;
+
+  scheduler.enqueue(request);
+  await new Promise((resolve) => setTimeout(resolve, 30));
+
+  assert.equal(response.writableEnded, true);
+  assert.equal(provider.releaseCount, 1);
+  assert.equal(provider.lastSignal?.aborted, false);
+  assert.equal(request.upstreamAbort, undefined);
+});
+
+test("client cancellation can abort upstream after streaming has started", async () => {
+  const provider = new StreamingProvider("stream", 10, 32_000);
+  provider.stall = true;
+  const scheduler = new RelayScheduler(config(), [provider]);
+  const response = new FakeResponse();
+  const request = job("stream-client-cancel", response);
+  request.stream = true;
+
+  scheduler.enqueue(request);
+  await new Promise((resolve) => setTimeout(resolve, 10));
+
+  assert.ok(request.upstreamAbort);
+  request.cancelled = true;
+  request.upstreamAbort.abort(new Error("client disconnected"));
+  await new Promise((resolve) => setTimeout(resolve, 20));
+
+  assert.equal(provider.lastSignal?.aborted, true);
+  assert.equal(provider.releaseCount, 1);
+  assert.equal(request.upstreamAbort, undefined);
+});
+
+test("upstream timeout remains active after a streaming response starts", async () => {
+  const provider = new StreamingProvider("stream", 10, 32_000);
+  provider.stall = true;
+  const timeoutConfig = config();
+  timeoutConfig.server.upstreamTimeoutSeconds = 0.02;
+  const scheduler = new RelayScheduler(timeoutConfig, [provider]);
+  const response = new FakeResponse();
+  const request = job("stream-timeout", response);
+  request.stream = true;
+
+  scheduler.enqueue(request);
+  await new Promise((resolve) => setTimeout(resolve, 60));
+
+  assert.equal(provider.lastSignal?.aborted, true);
+  assert.equal(response.writableEnded, true);
+  assert.equal(provider.releaseCount, 1);
+  assert.equal(request.upstreamAbort, undefined);
+});
 
 test("retry dispatch timing separates queue wait from request age", async () => {
   const google = new FakeProvider("google", 10, 16_000);
