@@ -1621,11 +1621,13 @@ export class GoogleProvider implements Provider {
     } catch (error) {
       this.release(model);
       if (error instanceof AntigravityManualResponseError) {
+        const failedAt = Date.now();
+        const reason = "invalid_completion_response";
         return {
-          status: "rejected",
+          status: "retryable",
           scope: "model",
-          httpStatus: 502,
-          bodyText: JSON.stringify({ error: { message: error.message } }),
+          reason,
+          retryAt: this.blockModel(model, DEFAULT_RETRY_MS, failedAt, reason),
         };
       }
       return this.classifyFailure(offer, model, error);
