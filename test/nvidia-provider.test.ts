@@ -191,7 +191,7 @@ test("NVIDIA successful execution calls chat completions and releases concurrenc
     if (result.status !== "success") return;
 
     assert.equal(calls, 1);
-    assert.deepEqual(await result.usage, { outputTokens: 5, totalTokens: expectedPromptTokens + 5 });
+    assert.deepEqual(await result.usage, { inputTokens: expectedPromptTokens, outputTokens: 5, totalTokens: expectedPromptTokens + 5 });
     assert.equal(provider.status().models[0]?.active, 1);
     result.release();
     assert.equal(provider.status().models[0]?.active, 0);
