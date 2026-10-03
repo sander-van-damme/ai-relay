@@ -57,7 +57,7 @@ function assertOptimized(value: Record<string, unknown>): void {
   assert.deepEqual(compaction.keep, { tokens: 3000 });
   assert.equal(compaction.buffer, 4000);
   assert.deepEqual(value.agents, { title: { disabled: true } });
-  assert.deepEqual(value.permission, { skill: "deny" });
+  assert.equal(value.permission, undefined);
 }
 
 test("creates a minimal config and missing parent directory", async () => {
@@ -138,12 +138,21 @@ test("preserves existing agents", () => {
   });
 });
 
-test("merges skill permission instead of replacing existing permissions", () => {
+test("preserves existing permissions without adding a skill restriction", () => {
   const value = parseJsonc(applyOptimizations('{ "permission": { "bash": "allow" } }').text);
-  assert.deepEqual(value.permission, {
-    bash: "allow",
-    skill: "deny",
-  });
+  assert.deepEqual(value.permission, { bash: "allow" });
+});
+
+test("removes the stale skill deny written by older optimizer versions", () => {
+  const value = parseJsonc(
+    applyOptimizations('{ "permission": { "bash": "allow", "skill": "deny" } }').text,
+  );
+  assert.deepEqual(value.permission, { bash: "allow" });
+});
+
+test("preserves an explicit non-deny skill permission", () => {
+  const value = parseJsonc(applyOptimizations('{ "permission": { "skill": "allow" } }').text);
+  assert.deepEqual(value.permission, { skill: "allow" });
 });
 
 test("retains JSONC comments and accepts trailing commas", () => {
@@ -168,7 +177,7 @@ test("optimization is idempotent", () => {
 test("dry run calculates changes without writing config, directory, or backup", async () => {
   const { directory, paths } = await fixture();
   const result = await optimizeConfig(paths, { dryRun: true });
-  assert.equal(result.changes.length, 8);
+  assert.equal(result.changes.length, 7);
   await assert.rejects(access(join(directory, "nested")));
   await assert.rejects(access(paths.configPath));
   await assert.rejects(access(paths.backupPath));
