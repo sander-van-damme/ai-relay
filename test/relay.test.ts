@@ -170,7 +170,7 @@ class StreamingProvider extends FakeProvider {
     const stalled = this.stall;
     const response = new Response(new ReadableStream<Uint8Array>({
       start(controller) {
-        controller.enqueue(encoder.encode("data: {\\"choices\\":[]}\\n\\n"));
+        controller.enqueue(encoder.encode('data: {"choices":[]}\\n\\n'));
         if (!stalled) {
           controller.enqueue(encoder.encode("data: [DONE]\\n\\n"));
           controller.close();
