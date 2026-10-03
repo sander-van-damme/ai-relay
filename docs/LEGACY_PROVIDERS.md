@@ -6,7 +6,7 @@ This file preserves the provider/API-key inventory from the previous `cloudflare
 | --- | --- | --- |
 | OpenRouter | `OPENROUTER_API_KEY` | OpenAI-compatible gateway |
 | OpenCode Inference | `OPENCODE_API_KEY` | Previous relay only used `*-free` models |
-| Groq | `GROQ_API_KEY` | OpenAI-compatible API |
+| Groq | `GROQ_API_KEY` | Active in the new relay; direct OpenAI-compatible Chat Completions provider |
 | Cerebras | `CEREBRAS_API_KEY` | OpenAI-compatible API |
 | Chutes | `CHUTES_API_KEY` | OpenAI-compatible API |
 | Vercel AI Gateway | `VERCEL_API_KEY` | OpenAI-compatible gateway |

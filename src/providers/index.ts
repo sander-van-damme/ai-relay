@@ -1,9 +1,10 @@
 import { createGoogleProvider } from "./google/index.ts";
+import { createGroqProvider } from "./groq/index.ts";
 import { createNvidiaProvider } from "./nvidia/index.ts";
 import type { Provider } from "./shared/types.ts";
 
 export function createProviders(): Provider[] {
-  return [createGoogleProvider(), createNvidiaProvider()];
+  return [createGoogleProvider(), createNvidiaProvider(), createGroqProvider()];
 }
 
 export type {
