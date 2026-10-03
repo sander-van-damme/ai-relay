@@ -115,6 +115,7 @@ export class RelayScheduler {
   readonly providers: readonly Provider[];
   readonly observability: Observability;
   private readonly providerById: Map<string, Provider>;
+  private readonly queuedAt = new WeakMap<RelayJob, number>();
   private timer?: NodeJS.Timeout;
   private draining = false;
 
@@ -134,6 +135,7 @@ export class RelayScheduler {
   }
 
   enqueue(job: RelayJob): void {
+    this.queuedAt.set(job, job.enqueuedAt);
     this.queue.push(job);
     this.observability.request(job.requestedModel, this.queue.filter((queued) => !queued.cancelled).length);
     log("info", "queue_enqueued", {
@@ -401,6 +403,8 @@ export class RelayScheduler {
     }
     job.yieldOnce = false;
     job.lastRetryFailure = undefined;
+    const queueStartedAt = this.queuedAt.get(job) ?? job.enqueuedAt;
+    this.queuedAt.delete(job);
 
     log("info", "queue_dispatched", {
       request_id: job.id,
@@ -413,7 +417,8 @@ export class RelayScheduler {
       available_at: Number.isFinite(choice.offer.availableAt)
         ? new Date(choice.offer.availableAt).toISOString()
         : null,
-      queue_ms: now - job.enqueuedAt,
+      queue_wait_ms: Math.max(0, now - queueStartedAt),
+      request_age_ms: Math.max(0, now - job.enqueuedAt),
       queue_bypasses: job.bypassCount,
       failure_count: job.failureCount,
       optimization_wait_ms: optimizationWaitMs(job.failureCount),
@@ -434,6 +439,7 @@ export class RelayScheduler {
     job.failureCount += 1;
     job.yieldOnce = true;
     job.bypassCount = 0;
+    this.queuedAt.set(job, Date.now());
     this.requeueByAge(job);
   }
 
@@ -578,6 +584,7 @@ export class RelayScheduler {
         retry_count: retryCount,
         retry_budget: MAX_RETRYABLE_FAILURES_PER_PATH,
         retry_at: Number.isFinite(result.retryAt) ? new Date(result.retryAt).toISOString() : null,
+        attempt_ms: Date.now() - startedAt,
       });
       this.markFailureAndRequeue(job);
       return;
@@ -593,6 +600,7 @@ export class RelayScheduler {
         scope: result.scope,
         status: result.httpStatus,
         detail: upstreamRejectionDetail(result.bodyText),
+        attempt_ms: Date.now() - startedAt,
       });
       if (isAutoModel(job.requestedModel)) {
         if (result.scope === "provider") job.excludedProviderIds.add(provider.id);
@@ -638,6 +646,7 @@ export class RelayScheduler {
         output_tokens: usage?.outputTokens ?? null,
         total_tokens: totalTokens ?? null,
         failovers: job.failureCount,
+        attempt_ms: Date.now() - startedAt,
         total_ms: Date.now() - job.enqueuedAt,
       });
     } catch (error) {
