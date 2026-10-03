@@ -2,7 +2,7 @@
 
 Google execution is implemented on the official `@google/genai` SDK and the native Interactions API via `interactions.create()`. Authoritative token counting normally uses the SDK's `models.countTokens()`; when the request includes count-relevant configuration such as system instructions, tools, or response schema, the provider calls the Gemini Developer API `:countTokens` REST endpoint with a full nested `generateContentRequest`. This is required because the pinned SDK's `CountTokensConfig` path does not support that configuration in Gemini Developer API mode.
 
-The checked-in catalog starts from the non-zero AI Studio quotas supplied for this relay project on 2026-10-01 and excludes routes that the Developer API subsequently reports as unavailable. In particular, both `gemini-2.5-flash` and `gemini-2.5-flash-lite` are omitted after the API returned 404 responses stating that they are no longer available to new users. The catalog otherwise includes text-capable Gemini Flash/Flash-Lite models, Gemma 4 26B/31B, Gemini Robotics ER 2 Preview, and the Antigravity managed agent. TTS, Live/audio, image-generation, embedding, video/music, zero-quota routes, and agents that do not fit the relay's chat-completions contract are excluded. Model-specific request capabilities such as supported thinking levels are treated as hard routing constraints.
+The checked-in catalog starts from the non-zero AI Studio quotas supplied for this relay project on 2026-10-01 and excludes routes that the Developer API subsequently reports as unavailable. In particular, both `gemini-2.5-flash` and `gemini-2.5-flash-lite` are omitted after the API returned 404 responses stating that they are no longer available to new users. The active catalog otherwise includes text-capable Gemini Flash/Flash-Lite models, Gemma 4 26B/31B, and Gemini Robotics ER 2 Preview. The Antigravity implementation is retained but its catalog entry is temporarily commented out while the new emulation path is validated. TTS, Live/audio, image-generation, embedding, video/music, zero-quota routes, and agents that do not fit the relay's chat-completions contract are excluded. Model-specific request capabilities such as supported thinking levels are treated as hard routing constraints.
 
 Each Google route has an explicit `preference` value. Capacity and availability remain the primary routing criteria. Preference is consulted only when candidates have the same effective input capacity and the same availability, with the larger value preferred. Values are deliberately spaced in increments of 100 so they can be adjusted later based on observed coding/task quality without changing the routing algorithm or pretending that release date alone determines quality.
 
@@ -12,7 +12,6 @@ Provider-native continuation state is preferred whenever the incoming OpenAI mes
 
 When that state is unavailable, the relay recovers without treating provider-native state as authoritative:
 
-- Antigravity cannot accept reconstructed function-call history in stateless mode. If the OpenAI history already contains tool calls/results but no safe Antigravity continuation exists, the relay starts a fresh Antigravity interaction with the supplied conversation flattened into a plain-text historical transcript. Historical tool activity is labeled as already completed context, while the caller's current function tools are still supplied normally. The resulting interaction ID is stored so later turns resume statefully with `previous_interaction_id`.
 - Gemini model routes use GenerateContent for reconstructed OpenAI tool history. External function-call parts receive Google's documented `skip_thought_signature_validator` migration signature, allowing a trace from another model/API to be replayed. Once Gemini responds, the relay preserves Google's native model content and thought signatures and uses that native GenerateContent history on later turns.
 - A stored continuation is ignored if the caller has introduced a new assistant tool-call trace after that continuation boundary; that trace is treated as external history and recovered instead of being injected into the old native chain.
 
@@ -20,26 +19,31 @@ Token counting follows the same request plan as execution, so transcript bootstr
 
 ## Antigravity
 
-`google/antigravity-preview-09-2026` is exposed through the same relay `/v1/chat/completions` API as the model-backed routes. The provider invokes `agent: "antigravity-preview-09-2026"` and pins the agent's underlying reasoning model to `gemini-3.8-flash`.
+The Antigravity implementation uses a deliberately different compatibility strategy from the model-backed Google routes. Antigravity is a managed agent with its own sandbox and native tool loop, so the relay does not register caller-provided Chat Completions tools as Antigravity tools and does not try to make the Google sandbox impersonate the caller's environment.
 
-Antigravity's managed-agent API requires an environment on every interaction. For a fresh interaction the relay supplies `environment: "remote"`, which asks Google to provision the required provider-owned sandbox. The returned `environment_id` is stored with the interaction ID and reused on stateful continuations. The relay does not mount caller files, repositories, credentials, or other sources into that environment.
+Instead, each outer Chat Completions request is handled as a one-shot manual emulation task:
 
-The relay also replaces Antigravity's default tool set with an explicit list containing:
+1. The relay provisions a fresh Antigravity environment with `environment: "remote"`.
+2. It omits the `tools` field entirely, leaving Antigravity's native/default capabilities intact.
+3. It serializes the complete raw Chat Completions request into a provider-owned prompt and tells Antigravity that it is manually acting as the response-producing side of an OpenAI-compatible Chat Completions endpoint.
+4. Tool definitions inside that raw JSON remain data describing the external caller's runtime. If the correct outer response is a tool call, Antigravity writes that tool call into the manual Chat Completions response instead of executing the outer tool itself.
+5. Antigravity emits the semantic response inside `<manual_openai_chat_completion_response>...</manual_openai_chat_completion_response>`.
+6. The relay extracts and validates the JSON. Transport metadata such as `id`, `object`, `created`, `model`, and `usage` is relay-owned; any versions supplied by Antigravity are ignored and replaced.
+7. If validation fails, the relay may continue the same temporary interaction for up to two correction attempts, supplying the exact validator error. This continuation exists only inside the processing of that single outer request.
+8. After success or failure, the relay makes a best-effort attempt to delete the temporary Google environment. Cleanup failure is logged but never changes an otherwise valid caller response.
 
-- Google Search, for public-information grounding;
-- any function tools supplied by the incoming Chat Completions request.
+Across outer Chat Completions requests, Antigravity is fully stateless. The relay never reuses an Antigravity `previous_interaction_id` or `environment_id`; the next request already carries its own complete conversation history.
 
-Because the tool list is explicit, Antigravity does not receive its default `code_execution` or URL Context tools. Caller-provided functions remain caller-owned: Google may request them, but the relay never executes them itself. The provider sandbox is not treated as the caller's authoritative workspace; the provider-owned system instruction continues to direct the agent to use caller-supplied tools for caller-environment actions.
+Streaming callers are also handled as one complete Antigravity emulation turn. Internal Antigravity progress and native tool activity are not forwarded. After the final manual response validates, the relay emits that completed semantic response as OpenAI-compatible SSE chunks.
 
-A short provider-owned system instruction only establishes that Antigravity is serving a chat-completions interface, that caller-provided functions operate on the caller's authoritative external environment, and that no filesystem/shell/runtime should be assumed beyond explicitly supplied tools. Client system/developer instructions are appended unchanged after that prefix.
+The Antigravity catalog entry remains disabled while this path is being validated. The underlying implementation and tests stay in place so it can be re-enabled without reconstructing the integration.
 
-Antigravity's AI Studio quota is configured as 60 RPM, 100K input TPM, and 100 RPD. Its documented 1,048,576-token input context is therefore capped to an effective single-request capacity of 100K by TPM. Authoritative request counting uses Google's `:countTokens` endpoint with a full `generateContentRequest` for the underlying `gemini-3.8-flash` model, including the relay prefix, Google Search tool declaration, and caller function definitions. When Chat Completions supplies `max_completion_tokens` (or legacy `max_tokens`), the relay maps it to Antigravity's total agent budget as `offer.inputTokens + max completion tokens`, so the caller's completion allowance is added on top of the authoritative initial input count. If no completion cap is supplied, `agent_config.max_total_tokens` is omitted. Other generation controls that the agent API cannot honor make the route ineligible rather than being silently ignored.
 
 ## Quotas and continuation
 
 Google quota accounting uses the AI Studio RPM, TPM and RPD limits. RPD resets at midnight in `America/Los_Angeles`. Speculative overflow is enabled only for RPD because observed project usage can exceed that displayed daily limit. RPM, TPM, context capacity and provider/model health remain hard constraints. If an overflow attempt receives a Google `429` that explicitly identifies the daily/RPD quota, overflow for that route is suppressed only until the next Pacific midnight, matching the same calendar-day boundary used by local RPD accounting. The learned overflow block is purged on the next provider evaluation/status read after that boundary. Generic `429` responses, unrelated network errors, and `5xx` responses do not create that observation.
 
-Interactions are stored so follow-up requests can use `previous_interaction_id`, preserving Google-native multi-turn/tool state. Antigravity continuations also store and resend the associated `environment_id`, because Google's managed-agent API requires both conversation state and environment state on chained interactions. Continuation keys distinguish model interactions from agent interactions even when Antigravity uses Gemini 3.8 Flash underneath. Continuation state is bounded to one hour and reused only on the same upstream target.
+Model-backed Google Interactions are stored so compatible follow-up requests can use `previous_interaction_id` and preserve Google-native state. GenerateContent continuations likewise preserve native model content and thought signatures. This continuation cache is not used for Antigravity: Antigravity is intentionally one-shot and stateless across outer Chat Completions requests.
 
 ## Configuration
 
