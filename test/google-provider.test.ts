@@ -400,7 +400,7 @@ test("Antigravity manually emulates the raw Chat Completions request in a fresh 
 
     assert.equal(payload.id, "chatcmpl-agent-1");
     assert.equal(payload.model, ANTIGRAVITY_MODEL.id);
-    assert.equal(payload.created, 1_759_305_600);
+    assert.equal(payload.created, 1_790_841_600);
     assert.deepEqual(payload.usage, {
       prompt_tokens: 20,
       completion_tokens: 7,
