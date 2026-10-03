@@ -65,6 +65,7 @@ async function bestOffer(
 function fakeClient(
   create: (request: unknown) => unknown | Promise<unknown>,
   count?: (request: unknown) => void,
+  deleteEnvironment?: (environmentId: string) => unknown | Promise<unknown>,
 ): GoogleGenAI {
   return {
     models: {
@@ -77,6 +78,9 @@ function fakeClient(
     },
     interactions: {
       create: async (request: unknown) => create(request),
+    },
+    environments: {
+      delete: async (environmentId: string) => deleteEnvironment?.(environmentId),
     },
   } as unknown as GoogleGenAI;
 }
@@ -94,6 +98,29 @@ function completedInteraction(id: string, text = "Hello back", environmentId?: s
       total_input_tokens: 10,
       total_output_tokens: 3,
       total_tokens: 13,
+    },
+  };
+}
+
+function manualAntigravityInteraction(
+  id: string,
+  response: Record<string, unknown> | string,
+  environmentId: string,
+  prefix = "Internal Antigravity work that must stay private.\n",
+) {
+  const payload = typeof response === "string" ? response : JSON.stringify(response);
+  const text = `${prefix}<manual_openai_chat_completion_response>\n${payload}\n</manual_openai_chat_completion_response>`;
+  return {
+    id,
+    environment_id: environmentId,
+    status: "completed",
+    created: "2026-10-01T08:00:00Z",
+    output_text: text,
+    steps: [{ type: "model_output", content: [{ type: "text", text }] }],
+    usage: {
+      total_input_tokens: 20,
+      total_output_tokens: 7,
+      total_tokens: 27,
     },
   };
 }
@@ -293,209 +320,170 @@ test("Google execution uses the official Interactions API and reuses stored cont
   }
 });
 
-test("Antigravity uses the agent API with Search and caller-provided functions only", async () => {
+test("Antigravity manually emulates the raw Chat Completions request in a fresh native sandbox", async () => {
   const originalKey = process.env.GEMINI_API_KEY;
   process.env.GEMINI_API_KEY = "test";
-  const antigravity = ANTIGRAVITY_MODEL;
   const requests: Array<Record<string, unknown>> = [];
   const countRequests: Array<Record<string, unknown>> = [];
-  let call = 0;
-  const client = fakeClient((request) => {
-    requests.push(request as Record<string, unknown>);
-    call += 1;
-    return completedInteraction(
-      `agent-${call}`,
-      call === 1 ? "First answer" : "Second answer",
-      "env-agent",
-    );
-  });
+  const deleted: string[] = [];
+
+  const client = fakeClient(
+    (request) => {
+      requests.push(request as Record<string, unknown>);
+      return manualAntigravityInteraction("agent-1", {
+        id: "made-up-id",
+        model: "made-up-model",
+        created: 1,
+        usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+        choices: [{
+          index: 0,
+          message: { role: "assistant", content: "Inspecting is the next step." },
+          finish_reason: "stop",
+        }],
+      }, "env-agent-1");
+    },
+    (request) => countRequests.push(request as Record<string, unknown>),
+    (environmentId) => deleted.push(environmentId),
+  );
 
   try {
-    const provider = new GoogleProvider(
-      () => client,
-      [antigravity],
-      async (_apiKey, model, input) => {
-        countRequests.push({ model, config: input.config } as Record<string, unknown>);
-        return 10;
-      },
-    );
-    const tools = [{
-      type: "function",
-      function: {
-        name: "read_file",
-        description: "Read a file from the caller's workspace",
-        parameters: {
-          type: "object",
-          properties: { path: { type: "string" } },
-          required: ["path"],
-        },
-      },
-    }];
-    const firstBody = {
+    const provider = new GoogleProvider(() => client, [ANTIGRAVITY_MODEL], async () => 999);
+    const body = {
+      model: "relay/auto",
       messages: [
-        { role: "system", content: "Follow the task carefully." },
+        { role: "system", content: "Work carefully." },
         { role: "user", content: "Inspect the project." },
       ],
-      tools,
+      tools: [{
+        type: "function",
+        function: {
+          name: "read_file",
+          description: "Read a caller-side file",
+          parameters: {
+            type: "object",
+            properties: { path: { type: "string" } },
+            required: ["path"],
+          },
+        },
+      }],
       tool_choice: "auto",
       max_completion_tokens: 32_000,
     };
-    const firstOffer = (await bestOffer(provider, {
+    const offer = (await bestOffer(provider, {
       ...standardRequest,
-      body: firstBody,
-      requestedModel: antigravity.id,
+      body,
+      requestedModel: ANTIGRAVITY_MODEL.id,
     }, Date.now()))!;
-    const firstResult = await provider.execute(firstOffer, firstBody, false, new AbortController().signal);
-    assert.equal(firstResult.status, "success");
-    if (firstResult.status !== "success") return;
-    firstResult.release();
 
-    assert.equal(countRequests[0]?.model, "gemini-3.8-flash");
-    const countConfig = countRequests[0]?.config as Record<string, unknown>;
-    assert.match(JSON.stringify(countConfig.systemInstruction), /reasoning backend for an OpenAI-compatible chat-completions interface/);
-    assert.match(JSON.stringify(countConfig.tools), /googleSearch/);
+    const result = await provider.execute(offer, body, false, new AbortController().signal);
+    assert.equal(result.status, "success");
+    if (result.status !== "success") return;
+    const payload = await result.response.json() as Record<string, unknown>;
+    result.release();
 
-    const firstRequest = requests[0]!;
-    assert.equal(firstRequest.agent, "antigravity-preview-09-2026");
-    assert.equal(firstRequest.model, undefined);
-    assert.equal(firstRequest.environment, "remote");
-    assert.deepEqual(firstRequest.agent_config, {
+    assert.equal(countRequests.length, 1);
+    assert.match(JSON.stringify(countRequests[0]), /manually acting as the response-producing side/i);
+
+    const upstream = requests[0]!;
+    assert.equal(upstream.agent, "antigravity-preview-09-2026");
+    assert.equal(upstream.environment, "remote");
+    assert.equal(upstream.previous_interaction_id, undefined);
+    assert.equal(upstream.stream, false);
+    assert.equal(upstream.tools, undefined);
+    assert.deepEqual(upstream.agent_config, {
       type: "antigravity",
       model: "gemini-3.8-flash",
-      max_total_tokens: "32010",
     });
-    assert.match(String(firstRequest.system_instruction), /reasoning backend for an OpenAI-compatible chat-completions interface/);
-    assert.match(String(firstRequest.system_instruction), /Follow the task carefully/);
-    assert.deepEqual(firstRequest.tools, [
-      { type: "google_search" },
-      {
-        type: "function",
-        name: "read_file",
-        description: "Read a file from the caller's workspace",
-        parameters: {
-          type: "object",
-          properties: { path: { type: "string" } },
-          required: ["path"],
-        },
-      },
-    ]);
-    assert.doesNotMatch(JSON.stringify(firstRequest), /code_execution|url_context/);
+    assert.match(String(upstream.input), /manual emulation task/i);
+    assert.match(String(upstream.input), /"name": "read_file"/);
+    assert.match(String(upstream.input), /tools belong to the external runtime/i);
 
-    const secondBody = {
-      messages: [
-        { role: "system", content: "Follow the task carefully." },
-        { role: "user", content: "Inspect the project." },
-        { role: "assistant", content: "First answer" },
-        { role: "user", content: "Continue." },
-      ],
-      tools,
-      tool_choice: "auto",
-      max_completion_tokens: 32_000,
-    };
-    const secondOffer = (await bestOffer(provider, {
-      ...standardRequest,
-      body: secondBody,
-      requestedModel: antigravity.id,
-    }, Date.now()))!;
-    const secondResult = await provider.execute(secondOffer, secondBody, false, new AbortController().signal);
-    assert.equal(secondResult.status, "success");
-    if (secondResult.status === "success") secondResult.release();
-
-    assert.equal(requests[1]?.previous_interaction_id, "agent-1");
-    assert.equal(requests[1]?.environment, "env-agent");
-    assert.deepEqual(requests[1]?.input, [
-      { type: "user_input", content: [{ type: "text", text: "Continue." }] },
-    ]);
+    assert.equal(payload.id, "chatcmpl-agent-1");
+    assert.equal(payload.model, ANTIGRAVITY_MODEL.id);
+    assert.equal(payload.created, 1_759_305_600);
+    assert.deepEqual(payload.usage, {
+      prompt_tokens: 20,
+      completion_tokens: 7,
+      total_tokens: 27,
+    });
+    const choices = payload.choices as Array<Record<string, unknown>>;
+    assert.deepEqual(choices[0]?.message, {
+      role: "assistant",
+      content: "Inspecting is the next step.",
+    });
+    assert.deepEqual(deleted, ["env-agent-1"]);
   } finally {
     if (originalKey === undefined) delete process.env.GEMINI_API_KEY;
     else process.env.GEMINI_API_KEY = originalKey;
   }
 });
 
-test("Antigravity keeps native tool-call continuations stateful", async () => {
+test("Antigravity represents caller tools only as outer Chat Completions tool calls", async () => {
   const originalKey = process.env.GEMINI_API_KEY;
   process.env.GEMINI_API_KEY = "test";
-  const antigravity = ANTIGRAVITY_MODEL;
   const requests: Array<Record<string, unknown>> = [];
-  let call = 0;
 
   try {
     const provider = new GoogleProvider(
       () => fakeClient((request) => {
         requests.push(request as Record<string, unknown>);
-        call += 1;
-        if (call === 1) {
-          return {
-            id: "native-agent-call",
-            environment_id: "env-native",
-            status: "requires_action",
-            created: "2026-10-01T08:00:00Z",
-            steps: [{
-              type: "function_call",
-              id: "call_native",
-              name: "read_file",
-              arguments: { path: "a.ts" },
-            }],
-            usage: { total_input_tokens: 10, total_output_tokens: 2, total_tokens: 12 },
-          };
-        }
-        return completedInteraction("native-agent-result", "Done", "env-native");
+        return manualAntigravityInteraction("agent-tool", {
+          choices: [{
+            index: 0,
+            message: {
+              role: "assistant",
+              content: null,
+              tool_calls: [{
+                id: "call_123",
+                type: "function",
+                function: {
+                  name: "read_file",
+                  arguments: "{\"path\":\"AGENTS.md\"}",
+                },
+              }],
+            },
+            finish_reason: "tool_calls",
+          }],
+        }, "env-tool");
       }),
-      [antigravity],
-      async () => 20,
+      [ANTIGRAVITY_MODEL],
     );
 
-    const tools = [{
+    const body = {
+      messages: [{ role: "user", content: "Read AGENTS.md" }],
+      tools: [{
+        type: "function",
+        function: {
+          name: "read_file",
+          parameters: {
+            type: "object",
+            properties: { path: { type: "string" } },
+            required: ["path"],
+          },
+        },
+      }],
+    };
+    const offer = (await bestOffer(provider, {
+      ...standardRequest,
+      body,
+      requestedModel: ANTIGRAVITY_MODEL.id,
+    }, Date.now()))!;
+    const result = await provider.execute(offer, body, false, new AbortController().signal);
+    assert.equal(result.status, "success");
+    if (result.status !== "success") return;
+    const payload = await result.response.json() as Record<string, unknown>;
+    result.release();
+
+    assert.equal(requests[0]?.tools, undefined);
+    const choice = (payload.choices as Array<Record<string, unknown>>)[0]!;
+    assert.equal(choice.finish_reason, "tool_calls");
+    assert.deepEqual((choice.message as Record<string, unknown>).tool_calls, [{
+      id: "call_123",
       type: "function",
       function: {
         name: "read_file",
-        parameters: { type: "object", properties: { path: { type: "string" } } },
+        arguments: "{\"path\":\"AGENTS.md\"}",
       },
-    }];
-    const firstBody = {
-      messages: [{ role: "user", content: "Inspect a.ts" }],
-      tools,
-      tool_choice: "auto",
-    };
-    const firstOffer = (await bestOffer(provider, {
-      ...standardRequest,
-      body: firstBody,
-      requestedModel: antigravity.id,
-    }, Date.now()))!;
-    const firstResult = await provider.execute(firstOffer, firstBody, false, new AbortController().signal);
-    assert.equal(firstResult.status, "success");
-    if (firstResult.status !== "success") return;
-    const firstPayload = await firstResult.response.json() as Record<string, unknown>;
-    firstResult.release();
-
-    const firstChoice = (firstPayload.choices as Array<Record<string, unknown>>)[0]!;
-    const assistant = firstChoice.message as Record<string, unknown>;
-    const secondBody = {
-      messages: [
-        ...firstBody.messages,
-        assistant,
-        { role: "tool", tool_call_id: "call_native", content: "file contents" },
-      ],
-      tools,
-      tool_choice: "auto",
-    };
-    const secondOffer = (await bestOffer(provider, {
-      ...standardRequest,
-      body: secondBody,
-      requestedModel: antigravity.id,
-    }, Date.now()))!;
-    const secondResult = await provider.execute(secondOffer, secondBody, false, new AbortController().signal);
-    assert.equal(secondResult.status, "success");
-    if (secondResult.status === "success") secondResult.release();
-
-    assert.equal(requests[0]?.environment, "remote");
-    assert.equal(requests[1]?.previous_interaction_id, "native-agent-call");
-    assert.equal(requests[1]?.environment, "env-native");
-    assert.deepEqual(requests[1]?.input, [{
-      type: "function_result",
-      name: "read_file",
-      call_id: "call_native",
-      result: [{ type: "text", text: "file contents" }],
     }]);
   } finally {
     if (originalKey === undefined) delete process.env.GEMINI_API_KEY;
@@ -503,103 +491,62 @@ test("Antigravity keeps native tool-call continuations stateful", async () => {
   }
 });
 
-test("Antigravity bootstraps external tool history as text, then resumes statefully", async () => {
+test("Antigravity validation repair stays inside the same temporary interaction", async () => {
   const originalKey = process.env.GEMINI_API_KEY;
   process.env.GEMINI_API_KEY = "test";
-  const antigravity = ANTIGRAVITY_MODEL;
   const requests: Array<Record<string, unknown>> = [];
-  const countInputs: Array<Record<string, unknown>> = [];
+  const deleted: string[] = [];
   let call = 0;
 
   try {
     const provider = new GoogleProvider(
-      () => fakeClient((request) => {
-        requests.push(request as Record<string, unknown>);
-        call += 1;
-        return completedInteraction(
-          `bootstrap-agent-${call}`,
-          call === 1 ? "Recovered context" : "Continued",
-          "env-bootstrap",
-        );
-      }),
-      [antigravity],
-      async (_apiKey, _model, input) => {
-        countInputs.push(input as unknown as Record<string, unknown>);
-        return 50;
-      },
+      () => fakeClient(
+        (request) => {
+          requests.push(request as Record<string, unknown>);
+          call += 1;
+          if (call === 1) {
+            return manualAntigravityInteraction(
+              "agent-invalid",
+              "{not valid JSON}",
+              "env-repair",
+            );
+          }
+          return manualAntigravityInteraction("agent-repaired", {
+            choices: [{
+              index: 0,
+              message: { role: "assistant", content: "Corrected." },
+              finish_reason: "stop",
+            }],
+          }, "env-repair", "");
+        },
+        undefined,
+        (environmentId) => deleted.push(environmentId),
+      ),
+      [ANTIGRAVITY_MODEL],
     );
 
-    const tools = [{
-      type: "function",
-      function: {
-        name: "read_file",
-        parameters: { type: "object", properties: { path: { type: "string" } } },
-      },
-    }];
-    const recoveredBody = {
-      messages: [
-        { role: "user", content: "Inspect a.ts" },
-        {
-          role: "assistant",
-          content: null,
-          tool_calls: [{
-            id: "call_external",
-            type: "function",
-            function: { name: "read_file", arguments: "{\"path\":\"a.ts\"}" },
-          }],
-        },
-        { role: "tool", tool_call_id: "call_external", content: "export const x = 1;" },
-        { role: "user", content: "Continue from that result." },
-      ],
-      tools,
-      tool_choice: "auto",
-    };
-
-    const firstOffer = (await bestOffer(provider, {
+    const body = { messages: [{ role: "user", content: "Hello" }] };
+    const offer = (await bestOffer(provider, {
       ...standardRequest,
-      body: recoveredBody,
-      requestedModel: antigravity.id,
+      body,
+      requestedModel: ANTIGRAVITY_MODEL.id,
     }, Date.now()))!;
-    const firstResult = await provider.execute(firstOffer, recoveredBody, false, new AbortController().signal);
-    assert.equal(firstResult.status, "success");
-    if (firstResult.status !== "success") return;
-    firstResult.release();
+    const result = await provider.execute(offer, body, false, new AbortController().signal);
+    assert.equal(result.status, "success");
+    if (result.status !== "success") return;
+    const payload = await result.response.json() as Record<string, unknown>;
+    result.release();
 
-    const firstCountContents = countInputs[0]?.contents as Array<Record<string, unknown>>;
-    assert.equal(firstCountContents.length, 1);
-    assert.match(JSON.stringify(firstCountContents), /historical conversation context/i);
-    assert.match(JSON.stringify(firstCountContents), /call_external/);
-
-    assert.equal(requests[0]?.previous_interaction_id, undefined);
+    assert.equal(requests.length, 2);
     assert.equal(requests[0]?.environment, "remote");
-    const bootstrapInput = requests[0]?.input as Array<Record<string, unknown>>;
-    assert.equal(bootstrapInput.length, 1);
-    assert.equal(bootstrapInput[0]?.type, "user_input");
-    assert.match(JSON.stringify(bootstrapInput), /ASSISTANT TOOL CALL/);
-    assert.doesNotMatch(JSON.stringify(bootstrapInput), /"type":"function_call"/);
-
-    const secondBody = {
-      ...recoveredBody,
-      messages: [
-        ...recoveredBody.messages,
-        { role: "assistant", content: "Recovered context" },
-        { role: "user", content: "One more thing." },
-      ],
-    };
-    const secondOffer = (await bestOffer(provider, {
-      ...standardRequest,
-      body: secondBody,
-      requestedModel: antigravity.id,
-    }, Date.now()))!;
-    const secondResult = await provider.execute(secondOffer, secondBody, false, new AbortController().signal);
-    assert.equal(secondResult.status, "success");
-    if (secondResult.status === "success") secondResult.release();
-
-    assert.equal(requests[1]?.previous_interaction_id, "bootstrap-agent-1");
-    assert.equal(requests[1]?.environment, "env-bootstrap");
-    assert.deepEqual(requests[1]?.input, [
-      { type: "user_input", content: [{ type: "text", text: "One more thing." }] },
-    ]);
+    assert.equal(requests[0]?.previous_interaction_id, undefined);
+    assert.equal(requests[1]?.environment, "env-repair");
+    assert.equal(requests[1]?.previous_interaction_id, "agent-invalid");
+    assert.match(String(requests[1]?.input), /validation failed/i);
+    assert.match(String(requests[1]?.input), /not valid JSON/i);
+    assert.deepEqual(deleted, ["env-repair"]);
+    const choice = (payload.choices as Array<Record<string, unknown>>)[0]!;
+    assert.equal((choice.message as Record<string, unknown>).content, "Corrected.");
   } finally {
     if (originalKey === undefined) delete process.env.GEMINI_API_KEY;
     else process.env.GEMINI_API_KEY = originalKey;
@@ -709,115 +656,139 @@ test("Gemini replays external tool history through GenerateContent and keeps nat
   }
 });
 
-test("Antigravity still overrides default tools when the caller provides no functions", async () => {
+test("Antigravity is stateless across outer requests and cleans up each fresh environment", async () => {
   const originalKey = process.env.GEMINI_API_KEY;
   process.env.GEMINI_API_KEY = "test";
-  const antigravity = ANTIGRAVITY_MODEL;
   const requests: Array<Record<string, unknown>> = [];
+  const deleted: string[] = [];
+  let call = 0;
 
   try {
     const provider = new GoogleProvider(
-      () => fakeClient((request) => {
-        requests.push(request as Record<string, unknown>);
-        return completedInteraction("agent-no-tools", "Hello back", "env-no-tools");
-      }),
-      [antigravity],
-      async () => 10,
+      () => fakeClient(
+        (request) => {
+          requests.push(request as Record<string, unknown>);
+          call += 1;
+          return manualAntigravityInteraction(`agent-${call}`, {
+            choices: [{
+              index: 0,
+              message: { role: "assistant", content: `Answer ${call}` },
+              finish_reason: "stop",
+            }],
+          }, `env-${call}`);
+        },
+        undefined,
+        (environmentId) => deleted.push(environmentId),
+      ),
+      [ANTIGRAVITY_MODEL],
     );
-    const body = { messages: [{ role: "user", content: "Hello" }] };
-    const offer = (await bestOffer(provider, {
-      ...standardRequest,
-      body,
-      requestedModel: antigravity.id,
-    }, Date.now()))!;
-    const result = await provider.execute(offer, body, false, new AbortController().signal);
-    assert.equal(result.status, "success");
-    if (result.status === "success") result.release();
 
-    assert.deepEqual(requests[0]?.tools, [{ type: "google_search" }]);
+    for (const content of ["First", "Second"]) {
+      const body = { messages: [{ role: "user", content }] };
+      const offer = (await bestOffer(provider, {
+        ...standardRequest,
+        body,
+        requestedModel: ANTIGRAVITY_MODEL.id,
+      }, Date.now()))!;
+      const result = await provider.execute(offer, body, false, new AbortController().signal);
+      assert.equal(result.status, "success");
+      if (result.status === "success") result.release();
+    }
+
+    assert.equal(requests.length, 2);
     assert.equal(requests[0]?.environment, "remote");
-    assert.deepEqual(requests[0]?.agent_config, {
-      type: "antigravity",
-      model: "gemini-3.8-flash",
-    });
+    assert.equal(requests[1]?.environment, "remote");
+    assert.equal(requests[0]?.previous_interaction_id, undefined);
+    assert.equal(requests[1]?.previous_interaction_id, undefined);
+    assert.deepEqual(deleted, ["env-1", "env-2"]);
   } finally {
     if (originalKey === undefined) delete process.env.GEMINI_API_KEY;
     else process.env.GEMINI_API_KEY = originalKey;
   }
 });
 
-test("Antigravity streaming captures environment state for the next turn", async () => {
+test("Antigravity streaming exposes only the validated manual response", async () => {
   const originalKey = process.env.GEMINI_API_KEY;
   process.env.GEMINI_API_KEY = "test";
-  const antigravity = ANTIGRAVITY_MODEL;
   const requests: Array<Record<string, unknown>> = [];
-  let call = 0;
-
-  async function* firstStream() {
-    yield {
-      event_type: "interaction.created",
-      interaction: {
-        id: "agent-stream-1",
-        environment_id: "env-stream-1",
-        status: "in_progress",
-        created: "2026-10-01T08:00:00Z",
-      },
-    };
-    yield { event_type: "step.delta", index: 0, delta: { type: "text", text: "Streamed answer" } };
-    yield {
-      event_type: "interaction.completed",
-      interaction: {
-        id: "agent-stream-1",
-        status: "completed",
-        usage: { total_input_tokens: 20, total_output_tokens: 2, total_tokens: 22 },
-      },
-    };
-  }
 
   try {
     const provider = new GoogleProvider(
       () => fakeClient((request) => {
         requests.push(request as Record<string, unknown>);
-        call += 1;
-        if (call === 1) return firstStream();
-        return completedInteraction("agent-stream-2", "Follow-up", "env-stream-1");
+        return manualAntigravityInteraction("agent-stream", {
+          choices: [{
+            index: 0,
+            message: { role: "assistant", content: "Visible answer" },
+            finish_reason: "stop",
+          }],
+        }, "env-stream", "I am searching and thinking internally.\n");
       }),
-      [antigravity],
-      async () => 20,
+      [ANTIGRAVITY_MODEL],
     );
 
-    const firstBody = { messages: [{ role: "user", content: "Hello" }] };
-    const firstOffer = (await bestOffer(provider, {
-      ...standardRequest,
-      body: firstBody,
-      requestedModel: antigravity.id,
-    }, Date.now()))!;
-    const firstResult = await provider.execute(firstOffer, firstBody, true, new AbortController().signal);
-    assert.equal(firstResult.status, "success");
-    if (firstResult.status !== "success") return;
-    const streamed = await firstResult.response.text();
-    firstResult.release();
-    assert.match(streamed, /Streamed answer/);
-    assert.equal(requests[0]?.environment, "remote");
-
-    const secondBody = {
-      messages: [
-        { role: "user", content: "Hello" },
-        { role: "assistant", content: "Streamed answer" },
-        { role: "user", content: "Continue." },
-      ],
+    const body = {
+      messages: [{ role: "user", content: "Hello" }],
+      stream: true,
+      stream_options: { include_usage: true },
     };
-    const secondOffer = (await bestOffer(provider, {
+    const offer = (await bestOffer(provider, {
       ...standardRequest,
-      body: secondBody,
-      requestedModel: antigravity.id,
+      body,
+      requestedModel: ANTIGRAVITY_MODEL.id,
     }, Date.now()))!;
-    const secondResult = await provider.execute(secondOffer, secondBody, false, new AbortController().signal);
-    assert.equal(secondResult.status, "success");
-    if (secondResult.status === "success") secondResult.release();
+    const result = await provider.execute(offer, body, true, new AbortController().signal);
+    assert.equal(result.status, "success");
+    if (result.status !== "success") return;
+    const text = await result.response.text();
+    result.release();
 
-    assert.equal(requests[1]?.previous_interaction_id, "agent-stream-1");
-    assert.equal(requests[1]?.environment, "env-stream-1");
+    assert.equal(requests[0]?.stream, false);
+    assert.match(text, /Visible answer/);
+    assert.doesNotMatch(text, /searching and thinking internally/);
+    assert.match(text, /"finish_reason":"stop"/);
+    assert.match(text, /"prompt_tokens":20/);
+    assert.match(text, /data: \[DONE\]/);
+  } finally {
+    if (originalKey === undefined) delete process.env.GEMINI_API_KEY;
+    else process.env.GEMINI_API_KEY = originalKey;
+  }
+});
+
+test("Antigravity environment cleanup failure does not fail a valid completion", async () => {
+  const originalKey = process.env.GEMINI_API_KEY;
+  process.env.GEMINI_API_KEY = "test";
+
+  try {
+    const provider = new GoogleProvider(
+      () => fakeClient(
+        () => manualAntigravityInteraction("agent-cleanup", {
+          choices: [{
+            index: 0,
+            message: { role: "assistant", content: "Still succeeds." },
+            finish_reason: "stop",
+          }],
+        }, "env-cleanup"),
+        undefined,
+        () => {
+          throw new Error("cleanup unavailable");
+        },
+      ),
+      [ANTIGRAVITY_MODEL],
+    );
+
+    const body = { messages: [{ role: "user", content: "Hello" }] };
+    const offer = (await bestOffer(provider, {
+      ...standardRequest,
+      body,
+      requestedModel: ANTIGRAVITY_MODEL.id,
+    }, Date.now()))!;
+    const result = await provider.execute(offer, body, false, new AbortController().signal);
+    assert.equal(result.status, "success");
+    if (result.status !== "success") return;
+    const payload = await result.response.json() as Record<string, unknown>;
+    result.release();
+    assert.equal(((payload.choices as Array<Record<string, unknown>>)[0]?.message as Record<string, unknown>).content, "Still succeeds.");
   } finally {
     if (originalKey === undefined) delete process.env.GEMINI_API_KEY;
     else process.env.GEMINI_API_KEY = originalKey;
