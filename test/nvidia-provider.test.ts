@@ -168,6 +168,8 @@ test("NVIDIA successful execution calls chat completions and releases concurrenc
     assert.equal(url, "https://integrate.api.nvidia.com/v1/chat/completions");
     const request = JSON.parse(String(init?.body)) as Record<string, unknown>;
     assert.equal(request.model, "openai/gpt-oss-20b");
+    assert.equal(request.stream, false);
+    assert.equal(request.stream_options, undefined);
     return jsonResponse({
       choices: [],
       usage: { prompt_tokens: expectedPromptTokens, completion_tokens: 5, total_tokens: expectedPromptTokens + 5 },
@@ -195,6 +197,132 @@ test("NVIDIA successful execution calls chat completions and releases concurrenc
     assert.equal(provider.status().models[0]?.active, 1);
     result.release();
     assert.equal(provider.status().models[0]?.active, 0);
+  } finally {
+    globalThis.fetch = originalFetch;
+    restoreKey();
+  }
+});
+
+
+test("NVIDIA streaming requests usage and preserves downstream SSE bytes", async () => {
+  const restoreKey = installKey();
+  const originalFetch = globalThis.fetch;
+  let expectedPromptTokens = 0;
+  let observedRequest: Record<string, unknown> | undefined;
+
+  globalThis.fetch = async (_input, init) => {
+    observedRequest = JSON.parse(String(init?.body)) as Record<string, unknown>;
+    const usage = {
+      prompt_tokens: expectedPromptTokens,
+      completion_tokens: 7,
+      total_tokens: expectedPromptTokens + 7,
+    };
+    const sse = [
+      'data: {"id":"chatcmpl-test","choices":[{"index":0,"delta":{"content":"hello"}}]}\n\n',
+      `data: ${JSON.stringify({ id: "chatcmpl-test", choices: [], usage })}\n\n`,
+      "data: [DONE]\n\n",
+    ].join("");
+    const bytes = new TextEncoder().encode(sse);
+    const splitAt = Math.floor(bytes.byteLength / 2);
+
+    return new Response(new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(bytes.slice(0, splitAt));
+        controller.enqueue(bytes.slice(splitAt));
+        controller.close();
+      },
+    }), {
+      status: 200,
+      headers: { "content-type": "text/event-stream" },
+    });
+  };
+
+  try {
+    const provider = createNvidiaProvider();
+    const streamBody = {
+      ...body,
+      stream_options: { include_usage: false },
+    };
+    const offerResult = await provider.getBestOffer({
+      ...baseRequest,
+      body: streamBody,
+    }, Date.now());
+    assert.equal(offerResult.status, "offer");
+    if (offerResult.status !== "offer") return;
+    expectedPromptTokens = offerResult.offer.inputTokens;
+
+    const result = await provider.execute(
+      offerResult.offer,
+      streamBody,
+      true,
+      new AbortController().signal,
+    );
+    assert.equal(result.status, "success");
+    if (result.status !== "success") return;
+
+    assert.equal(observedRequest?.stream, true);
+    assert.deepEqual(observedRequest?.stream_options, { include_usage: true });
+
+    const downstream = await result.response.text();
+    const expectedUsage = {
+      prompt_tokens: expectedPromptTokens,
+      completion_tokens: 7,
+      total_tokens: expectedPromptTokens + 7,
+    };
+    const expectedSse = [
+      'data: {"id":"chatcmpl-test","choices":[{"index":0,"delta":{"content":"hello"}}]}\n\n',
+      `data: ${JSON.stringify({ id: "chatcmpl-test", choices: [], usage: expectedUsage })}\n\n`,
+      "data: [DONE]\n\n",
+    ].join("");
+
+    assert.equal(downstream, expectedSse);
+    assert.deepEqual(await result.usage, {
+      inputTokens: expectedPromptTokens,
+      outputTokens: 7,
+      totalTokens: expectedPromptTokens + 7,
+    });
+
+    result.release();
+    assert.equal(provider.status().models[0]?.active, 0);
+  } finally {
+    globalThis.fetch = originalFetch;
+    restoreKey();
+  }
+});
+
+test("NVIDIA streaming leaves usage unavailable when no usage event is returned", async () => {
+  const restoreKey = installKey();
+  const originalFetch = globalThis.fetch;
+
+  globalThis.fetch = async (_input, init) => {
+    const request = JSON.parse(String(init?.body)) as Record<string, unknown>;
+    assert.equal(request.stream, true);
+    assert.deepEqual(request.stream_options, { include_usage: true });
+    return new Response(
+      'data: {"id":"chatcmpl-test","choices":[{"index":0,"delta":{"content":"hello"}}]}\n\ndata: [DONE]\n\n',
+      { status: 200, headers: { "content-type": "text/event-stream" } },
+    );
+  };
+
+  try {
+    const provider = createNvidiaProvider();
+    const offerResult = await provider.getBestOffer(baseRequest, Date.now());
+    assert.equal(offerResult.status, "offer");
+    if (offerResult.status !== "offer") return;
+
+    const result = await provider.execute(
+      offerResult.offer,
+      body,
+      true,
+      new AbortController().signal,
+    );
+    assert.equal(result.status, "success");
+    if (result.status !== "success") return;
+
+    const downstream = await result.response.text();
+    assert.match(downstream, /data: \[DONE\]/);
+    assert.equal(await result.usage, undefined);
+    result.release();
   } finally {
     globalThis.fetch = originalFetch;
     restoreKey();
