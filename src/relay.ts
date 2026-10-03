@@ -220,7 +220,7 @@ export class RelayScheduler {
             provider: provider.id,
             relay_model: result.offer.modelId,
             offer_kind: offerKind,
-            input_tokens: result.offer.inputTokens,
+            routing_input_tokens: result.offer.inputTokens,
             input_capacity_tokens: result.offer.inputCapacityTokens,
             available_at: Number.isFinite(result.offer.availableAt)
               ? new Date(result.offer.availableAt).toISOString()
@@ -412,7 +412,7 @@ export class RelayScheduler {
       provider: choice.offer.providerId,
       offer_kind: choice.offer.kind,
       provider_priority: choice.offer.providerPriority,
-      input_tokens: choice.offer.inputTokens,
+      routing_input_tokens: choice.offer.inputTokens,
       input_capacity_tokens: choice.offer.inputCapacityTokens,
       available_at: Number.isFinite(choice.offer.availableAt)
         ? new Date(choice.offer.availableAt).toISOString()
@@ -619,7 +619,7 @@ export class RelayScheduler {
         relay_model: offer.modelId,
         provider: provider.id,
         offer_kind: offer.kind,
-        input_tokens: offer.inputTokens,
+        routing_input_tokens: offer.inputTokens,
         status: result.response.status,
         connect_ms: Date.now() - startedAt,
       });
@@ -632,19 +632,18 @@ export class RelayScheduler {
         }
         if (job.cancelled) return;
         const usage = await result.usage?.catch(() => undefined);
-        this.observability.success(provider.id, offer.modelId, offer.inputTokens, usage);
-        const totalTokens = usage?.totalTokens
-          ?? (usage?.outputTokens !== undefined ? offer.inputTokens + usage.outputTokens : undefined);
+        this.observability.success(provider.id, offer.modelId, usage);
         log("info", "request_complete", {
           request_id: job.id,
           relay_model: offer.modelId,
           provider: provider.id,
           offer_kind: offer.kind,
           provider_priority: offer.providerPriority,
-          input_tokens: offer.inputTokens,
+          routing_input_tokens: offer.inputTokens,
           input_capacity_tokens: offer.inputCapacityTokens,
-          output_tokens: usage?.outputTokens ?? null,
-          total_tokens: totalTokens ?? null,
+          upstream_input_tokens: usage?.inputTokens ?? null,
+          upstream_output_tokens: usage?.outputTokens ?? null,
+          upstream_total_tokens: usage?.totalTokens ?? null,
           failovers: job.failureCount,
           attempt_ms: Date.now() - startedAt,
           total_ms: Date.now() - job.enqueuedAt,
