@@ -107,8 +107,7 @@ const NO_MINIMAL_THINKING: readonly GoogleThinkingLevel[] = ["low", "medium", "h
 
 export const GOOGLE_MODELS: readonly GoogleModel[] = [
   { id: "google/gemini-3.8-flash", upstreamModel: "gemini-3.8-flash", contextWindowTokens: 1_048_576, quota: quota(5, 250_000, 20), preference: 1_300, transport: "interactions", thinkingLevels: NO_MINIMAL_THINKING },
-  // Temporarily disabled: Antigravity is not reliable enough to expose as an active model.
-  // { id: "google/antigravity-preview-09-2026", upstreamModel: "gemini-3.8-flash", upstreamAgent: ANTIGRAVITY_AGENT, contextWindowTokens: 1_048_576, quota: quota(60, 100_000, 100), preference: 1_200, transport: "interactions" },
+  { id: "google/antigravity-preview-09-2026", upstreamModel: "gemini-3.8-flash", upstreamAgent: ANTIGRAVITY_AGENT, contextWindowTokens: 1_048_576, quota: quota(60, 100_000, 100), preference: 1_200, transport: "interactions" },
   { id: "google/gemini-3.7-flash", upstreamModel: "gemini-3.7-flash", contextWindowTokens: 1_048_576, quota: quota(5, 250_000, 20), preference: 1_100, transport: "interactions", thinkingLevels: NO_MINIMAL_THINKING },
   { id: "google/gemini-3.6-flash", upstreamModel: "gemini-3.6-flash", contextWindowTokens: 1_048_576, quota: quota(5, 250_000, 20), preference: 1_000, transport: "interactions", thinkingLevels: ALL_THINKING },
   { id: "google/gemini-3.5-flash", upstreamModel: "gemini-3.5-flash", contextWindowTokens: 1_048_576, quota: quota(5, 250_000, 20), preference: 900, transport: "interactions", thinkingLevels: ALL_THINKING },
