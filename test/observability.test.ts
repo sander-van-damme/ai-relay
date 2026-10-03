@@ -39,7 +39,7 @@ test("observability separates registered provider-contract state from called-mod
   stats.attempt("test", "test/one", 10);
   stats.failedAttempt("test", "test/one");
   stats.attempt("test", "test/one", 12);
-  stats.success("test", "test/one", 12, { outputTokens: 5, totalTokens: 17 });
+  stats.success("test", "test/one", { inputTokens: 11, outputTokens: 5, totalTokens: 16 });
   stats.request("test/one", 2);
   stats.terminalFailure();
   stats.cancellation();
@@ -51,9 +51,10 @@ test("observability separates registered provider-contract state from called-mod
   assert.equal(snapshot.totals.terminalFailures, 1);
   assert.equal(snapshot.totals.failedAttempts, 1);
   assert.equal(snapshot.totals.attempts, 2);
-  assert.equal(snapshot.totals.inputTokens, 22);
-  assert.equal(snapshot.totals.outputTokens, 5);
-  assert.equal(snapshot.totals.totalTokens, 27);
+  assert.equal(snapshot.totals.routingInputTokens, 22);
+  assert.equal(snapshot.totals.upstreamInputTokens, 11);
+  assert.equal(snapshot.totals.upstreamOutputTokens, 5);
+  assert.equal(snapshot.totals.upstreamTotalTokens, 16);
   assert.deepEqual(
     snapshot.requested_models.map((row: any) => [row.model, row.kind, row.requests]),
     [["auto", "auto", 1], ["test/one", "explicit", 1]],
@@ -70,4 +71,17 @@ test("observability separates registered provider-contract state from called-mod
     ]),
     [["test/one", "test", 100, 2, 1, 1]],
   );
+});
+
+
+test("observability keeps missing upstream usage unavailable", () => {
+  const stats = new Observability([provider]);
+  stats.attempt("test", "test/one", 12);
+  stats.success("test", "test/one");
+
+  const snapshot = stats.snapshot(0) as any;
+  assert.equal(snapshot.totals.routingInputTokens, 12);
+  assert.equal(snapshot.totals.upstreamInputTokens, null);
+  assert.equal(snapshot.totals.upstreamOutputTokens, null);
+  assert.equal(snapshot.totals.upstreamTotalTokens, null);
 });

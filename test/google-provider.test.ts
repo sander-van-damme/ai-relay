@@ -1023,7 +1023,7 @@ test("generateContent fallback streaming is translated to OpenAI SSE", async () 
     assert.match(text, /"finish_reason":"stop"/);
     assert.doesNotMatch(text, /"prompt_tokens":10/);
     assert.match(text, /data: \[DONE\]/);
-    assert.deepEqual(await result.usage, { outputTokens: 2, totalTokens: 12 });
+    assert.deepEqual(await result.usage, { inputTokens: 10, outputTokens: 2, totalTokens: 12 });
   } finally {
     if (originalKey === undefined) delete process.env.GEMINI_API_KEY;
     else process.env.GEMINI_API_KEY = originalKey;

@@ -60,7 +60,11 @@ export interface ProviderStatus {
 export type ProviderFailureScope = "provider" | "model";
 
 export interface ProviderUsage {
+  /** Provider-reported input/prompt tokens for the executed upstream request. */
+  inputTokens?: number;
+  /** Provider-reported output/completion tokens. */
   outputTokens?: number;
+  /** Provider-reported total tokens. */
   totalTokens?: number;
 }
 

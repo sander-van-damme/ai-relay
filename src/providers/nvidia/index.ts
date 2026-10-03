@@ -421,7 +421,9 @@ class NvidiaProvider implements Provider {
           });
         }
 
+        if (promptTokens === undefined && completionTokens === undefined && totalTokens === undefined) return undefined;
         return {
+          ...(promptTokens !== undefined ? { inputTokens: promptTokens } : {}),
           ...(completionTokens !== undefined ? { outputTokens: completionTokens } : {}),
           ...(totalTokens !== undefined ? { totalTokens } : {}),
         };
