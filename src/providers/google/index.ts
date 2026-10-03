@@ -55,6 +55,13 @@ const OVERFLOW_LIMITS = new Set<QuotaLimitName>(["requestsPerDay"]);
 const ANTIGRAVITY_AGENT = "antigravity-preview-09-2026";
 const ANTIGRAVITY_MAX_REPAIR_ATTEMPTS = 2;
 
+class AntigravityManualResponseError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "AntigravityManualResponseError";
+  }
+}
+
 export type GoogleTransport = "interactions" | "generate-content";
 export type GoogleThinkingLevel = "minimal" | "low" | "medium" | "high";
 
@@ -609,7 +616,6 @@ export class GoogleProvider implements Provider {
       transport: "interactions",
       target: interactionTarget(model),
       replayExternalToolHistory: false,
-      bootstrapAntigravity: false,
     };
   }
 
@@ -1305,6 +1311,164 @@ export class GoogleProvider implements Provider {
     };
   }
 
+
+  private async executeAntigravityManual(
+    offer: ProviderOffer,
+    model: GoogleModel,
+    body: ChatCompletionRequest,
+    stream: boolean,
+    signal: AbortSignal,
+  ): Promise<{ response: Response; usage: Promise<ProviderUsage | undefined> }> {
+    if (!model.upstreamAgent) throw new Error(`Google model ${model.id} is not an agent route.`);
+
+    const client = this.googleClient();
+    const state = this.modelState(model.id);
+    let environmentId: string | undefined;
+    let interactionId: string | undefined;
+    let aggregateInputTokens = 0;
+    let aggregateOutputTokens = 0;
+    let aggregateTotalTokens = 0;
+    let sawUsage = false;
+
+    const recordUsage = (interaction: unknown) => {
+      const usage = object(object(interaction)?.usage);
+      if (!usage) return;
+      const input = usage.total_input_tokens;
+      const output = usage.total_output_tokens;
+      const total = usage.total_tokens;
+      if (typeof input === "number") aggregateInputTokens += input;
+      if (typeof output === "number") aggregateOutputTokens += output;
+      if (typeof total === "number") aggregateTotalTokens += total;
+      sawUsage = true;
+    };
+
+    const create = async (
+      input: string,
+      continuation?: { interactionId: string; environmentId: string },
+    ): Promise<unknown> => {
+      const request = {
+        agent: model.upstreamAgent,
+        agent_config: {
+          type: "antigravity",
+          model: model.upstreamModel,
+        },
+        input,
+        store: true,
+        stream: false,
+        environment: continuation?.environmentId ?? "remote",
+        ...(continuation ? { previous_interaction_id: continuation.interactionId } : {}),
+      };
+      return client.interactions.create(request as any, { fetchOptions: { signal } } as any);
+    };
+
+    let interaction: unknown;
+    try {
+      interaction = await create(antigravityManualPrompt(body));
+
+      for (let repairAttempt = 0; ; repairAttempt += 1) {
+        const value = object(interaction);
+        if (!value) throw new AntigravityManualResponseError("Antigravity returned an invalid interaction object.");
+
+        const currentEnvironmentId = typeof value.environment_id === "string"
+          ? value.environment_id
+          : typeof value.environmentId === "string"
+            ? value.environmentId
+            : undefined;
+        if (currentEnvironmentId) environmentId = currentEnvironmentId;
+        if (typeof value.id === "string") interactionId = value.id;
+        recordUsage(interaction);
+
+        if (value.status === "failed" || value.status === "cancelled") {
+          throw new AntigravityManualResponseError(
+            `Antigravity interaction ${value.status}: ${JSON.stringify(value.errors ?? {})}`,
+          );
+        }
+
+        try {
+          const payload = parseManualChatCompletion(antigravityInteractionText(interaction));
+          const semantic = validateManualChatCompletion(payload, body);
+          const createdMs = typeof value.created === "string" ? Date.parse(value.created) : Number.NaN;
+          const promptTokens = aggregateInputTokens || offer.inputTokens;
+          const completionTokens = aggregateOutputTokens;
+          const totalTokens = aggregateTotalTokens || promptTokens + completionTokens;
+          const responsePayload = buildRelayChatCompletion(semantic, {
+            id: `chatcmpl-${interactionId ?? "antigravity"}`,
+            model: offer.modelId,
+            created: Number.isFinite(createdMs) ? Math.floor(createdMs / 1000) : Math.floor(Date.now() / 1000),
+            usage: {
+              prompt_tokens: promptTokens,
+              completion_tokens: completionTokens,
+              total_tokens: totalTokens,
+            },
+          });
+
+          const response = stream
+            ? chatCompletionToSse(responsePayload, streamIncludesUsage(body))
+            : new Response(JSON.stringify(responsePayload), {
+                status: 200,
+                headers: { "content-type": "application/json; charset=utf-8" },
+              });
+          const providerUsage = sawUsage
+            ? Promise.resolve({
+                outputTokens: aggregateOutputTokens,
+                totalTokens: aggregateTotalTokens || promptTokens + aggregateOutputTokens,
+              })
+            : Promise.resolve(undefined);
+          return { response, usage: providerUsage };
+        } catch (error) {
+          const validationError = error instanceof Error ? error.message : String(error);
+          if (
+            repairAttempt >= ANTIGRAVITY_MAX_REPAIR_ATTEMPTS
+            || !interactionId
+            || !environmentId
+          ) {
+            throw new AntigravityManualResponseError(
+              `Antigravity manual Chat Completions response failed validation: ${validationError}`,
+            );
+          }
+
+          const repairInputTokens = offer.inputTokens;
+          const delayMs = quotaDelayMs(model.quota, state, repairInputTokens, Date.now());
+          if (delayMs > 0) {
+            throw new AntigravityManualResponseError(
+              `Antigravity manual response failed validation and repair quota is unavailable: ${validationError}`,
+            );
+          }
+
+          log("warn", "antigravity_response_repair", {
+            provider: this.id,
+            relay_model: model.id,
+            attempt: repairAttempt + 1,
+            validation_error: validationError,
+          });
+
+          reserveQuota(model.quota, state, repairInputTokens, Date.now());
+          try {
+            interaction = await create(
+              antigravityRepairPrompt(validationError),
+              { interactionId, environmentId },
+            );
+          } finally {
+            releaseQuota(state);
+          }
+        }
+      }
+    } finally {
+      if (environmentId) {
+        try {
+          await client.environments.delete(environmentId);
+        } catch (error) {
+          log("warn", "antigravity_environment_cleanup_failed", {
+            provider: this.id,
+            relay_model: model.id,
+            environment_id: environmentId,
+            error: error instanceof Error ? error.message : String(error),
+          });
+        }
+      }
+    }
+  }
+
   async execute(
     offer: ProviderOffer,
     body: ChatCompletionRequest,
@@ -1319,12 +1483,41 @@ export class GoogleProvider implements Provider {
     reserveQuota(model.quota, this.modelState(model.id), offer.inputTokens, Date.now());
 
     try {
+      if (model.upstreamAgent) {
+        const antigravity = await this.executeAntigravityManual(offer, model, body, stream, signal);
+
+        const providerFailures = this.providerFailureCount;
+        const modelFailures = this.modelFailureCounts.get(model.id) ?? 0;
+        this.providerFailureCount = 0;
+        this.modelFailureCounts.set(model.id, 0);
+        if (providerFailures > 0 || modelFailures > 0) {
+          log("info", "provider_recovered", {
+            provider: this.id,
+            relay_model: model.id,
+            provider_failures: providerFailures,
+            model_failures: modelFailures,
+          });
+        }
+
+        let released = false;
+        return {
+          status: "success",
+          response: antigravity.response,
+          usage: antigravity.usage,
+          release: () => {
+            if (released) return;
+            released = true;
+            this.release(model);
+          },
+        };
+      }
+
       const plan = this.requestPlan(body, model);
-      if (plan.bootstrapAntigravity || plan.replayExternalToolHistory) {
+      if (plan.replayExternalToolHistory) {
         log("info", "google_history_recovery", {
           provider: this.id,
           relay_model: model.id,
-          mode: plan.bootstrapAntigravity ? "antigravity_transcript" : "generate_content_replay",
+          mode: "generate_content_replay",
         });
       }
       const target = plan.target;
@@ -1375,10 +1568,7 @@ export class GoogleProvider implements Provider {
             inputStartIndex: continuation.inputStartIndex,
           } : undefined,
         );
-        const interactionRequest = model.upstreamAgent
-          ? antigravityRequest(request, model, offer.inputTokens, continuation?.environmentId)
-          : request;
-        const result = await client.interactions.create(interactionRequest as any, { fetchOptions: { signal } } as any);
+        const result = await client.interactions.create(request as any, { fetchOptions: { signal } } as any);
 
         if (stream) {
           const streamed = this.openAIStream(result as unknown as AsyncIterable<unknown>, offer, body, target);
@@ -1430,6 +1620,14 @@ export class GoogleProvider implements Provider {
       };
     } catch (error) {
       this.release(model);
+      if (error instanceof AntigravityManualResponseError) {
+        return {
+          status: "rejected",
+          scope: "model",
+          httpStatus: 502,
+          bodyText: JSON.stringify({ error: { message: error.message } }),
+        };
+      }
       return this.classifyFailure(offer, model, error);
     }
   }
