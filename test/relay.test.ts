@@ -71,6 +71,7 @@ class FakeProvider implements Provider {
   supportsOverflow = false;
   standardAvailableAt = 0;
   readonly executionKinds: string[] = [];
+  executionDelayMs = 0;
 
   readonly id: string;
   readonly priority: number;
@@ -130,7 +131,7 @@ class FakeProvider implements Provider {
     this.executionOrder.push(id);
     this.executionKinds.push(offer.kind);
     this.active = true;
-    await new Promise((resolve) => setTimeout(resolve, 0));
+    await new Promise((resolve) => setTimeout(resolve, this.executionDelayMs));
     this.active = false;
     if (this.failFirstFor.delete(id) || this.failAlwaysFor.has(id)) {
       this.blockedUntil = this.blockOnFailure ? Date.now() + 20_000 : 0;
@@ -208,6 +209,54 @@ test("a failed old request yields one dispatch turn to a younger runnable reques
   assert.equal(bResponse.writableEnded, true);
   assert.equal(a.failureCount, 1);
   a.cancelled = true;
+});
+
+
+test("retry dispatch timing separates queue wait from request age", async () => {
+  const google = new FakeProvider("google", 10, 16_000);
+  const nvidia = new FakeProvider("nvidia", 20, 32_000);
+  google.failFirstFor.add("timing-A");
+  google.blockOnFailure = false;
+  google.executionDelayMs = 25;
+
+  const scheduler = new RelayScheduler(config(), [google, nvidia]);
+  const response = new FakeResponse();
+  const request = job("timing-A", response);
+  const lines: Array<Record<string, unknown>> = [];
+  const originalLog = console.log;
+  console.log = (value?: unknown): void => {
+    if (typeof value !== "string") return;
+    try {
+      const parsed = JSON.parse(value) as Record<string, unknown>;
+      if (parsed.request_id === request.id) lines.push(parsed);
+    } catch {
+      // Ignore unrelated console output.
+    }
+  };
+
+  try {
+    scheduler.enqueue(request);
+    await new Promise((resolve) => setTimeout(resolve, 80));
+  } finally {
+    console.log = originalLog;
+  }
+
+  const dispatches = lines.filter((line) => line.event === "queue_dispatched");
+  assert.equal(dispatches.length, 2);
+
+  const first = dispatches[0]!;
+  const second = dispatches[1]!;
+  assert.equal(typeof first.queue_wait_ms, "number");
+  assert.equal(typeof first.request_age_ms, "number");
+  assert.equal(typeof second.queue_wait_ms, "number");
+  assert.equal(typeof second.request_age_ms, "number");
+  assert.equal("queue_ms" in first, false);
+  assert.equal("queue_ms" in second, false);
+
+  const secondQueueWait = Number(second.queue_wait_ms);
+  const secondRequestAge = Number(second.request_age_ms);
+  assert.ok(secondRequestAge - secondQueueWait >= 15);
+  assert.equal(response.writableEnded, true);
 });
 
 test("retryable provider failure falls through to another provider instead of looping", async () => {
