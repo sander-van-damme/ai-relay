@@ -558,111 +558,115 @@ export class RelayScheduler {
 
     const startedAt = Date.now();
     this.observability.attempt(provider.id, offer.modelId, offer.inputTokens);
-    const result = await provider.execute(
-      offer,
-      job.body,
-      job.stream,
-      controller.signal,
-    );
-    clearTimeout(timeout);
-    job.upstreamAbort = undefined;
-    if (job.cancelled) {
-      if (result.status === "success") result.release();
-      return;
-    }
-
-    if (result.status === "retryable") {
-      this.observability.failedAttempt(provider.id, offer.modelId);
-      const retryCount = this.recordRetryableFailure(job, provider, offer, result);
-      log("warn", "provider_retryable_failure", {
-        request_id: job.id,
-        relay_model: offer.modelId,
-        provider: provider.id,
-        offer_kind: offer.kind,
-        scope: result.scope,
-        reason: result.reason,
-        retry_count: retryCount,
-        retry_budget: MAX_RETRYABLE_FAILURES_PER_PATH,
-        retry_at: Number.isFinite(result.retryAt) ? new Date(result.retryAt).toISOString() : null,
-        attempt_ms: Date.now() - startedAt,
-      });
-      this.markFailureAndRequeue(job);
-      return;
-    }
-
-    if (result.status === "rejected") {
-      this.observability.failedAttempt(provider.id, offer.modelId);
-      log("warn", "provider_rejected", {
-        request_id: job.id,
-        relay_model: offer.modelId,
-        provider: provider.id,
-        offer_kind: offer.kind,
-        scope: result.scope,
-        status: result.httpStatus,
-        detail: upstreamRejectionDetail(result.bodyText),
-        attempt_ms: Date.now() - startedAt,
-      });
-      if (isAutoModel(job.requestedModel)) {
-        if (result.scope === "provider") job.excludedProviderIds.add(provider.id);
-        else job.excludedModelIds.add(offer.modelId);
-        job.lastRetryFailure = undefined;
-        this.markFailureAndRequeue(job);
-      } else {
-        this.observability.terminalFailure(provider.id, offer.modelId);
-        this.terminalForJob(job, result.httpStatus, result.bodyText);
-      }
-      return;
-    }
-
-    log("info", "upstream_response", {
-      request_id: job.id,
-      relay_model: offer.modelId,
-      provider: provider.id,
-      offer_kind: offer.kind,
-      input_tokens: offer.inputTokens,
-      status: result.response.status,
-      connect_ms: Date.now() - startedAt,
-    });
 
     try {
-      if (job.stream) await this.forwardStream(job, offer.modelId, result.response);
-      else {
-        const text = await result.response.text();
-        if (!job.cancelled && !job.response.writableEnded && !job.response.destroyed) job.response.end(text);
+      const result = await provider.execute(
+        offer,
+        job.body,
+        job.stream,
+        controller.signal,
+      );
+      if (job.cancelled) {
+        if (result.status === "success") result.release();
+        return;
       }
-      if (job.cancelled) return;
-      const usage = await result.usage?.catch(() => undefined);
-      this.observability.success(provider.id, offer.modelId, offer.inputTokens, usage);
-      const totalTokens = usage?.totalTokens
-        ?? (usage?.outputTokens !== undefined ? offer.inputTokens + usage.outputTokens : undefined);
-      log("info", "request_complete", {
-        request_id: job.id,
-        relay_model: offer.modelId,
-        provider: provider.id,
-        offer_kind: offer.kind,
-        provider_priority: offer.providerPriority,
-        input_tokens: offer.inputTokens,
-        input_capacity_tokens: offer.inputCapacityTokens,
-        output_tokens: usage?.outputTokens ?? null,
-        total_tokens: totalTokens ?? null,
-        failovers: job.failureCount,
-        attempt_ms: Date.now() - startedAt,
-        total_ms: Date.now() - job.enqueuedAt,
-      });
-    } catch (error) {
-      if (!job.cancelled) {
+
+      if (result.status === "retryable") {
         this.observability.failedAttempt(provider.id, offer.modelId);
-        this.observability.terminalFailure(provider.id, offer.modelId);
-        log("warn", "upstream_body_error", {
+        const retryCount = this.recordRetryableFailure(job, provider, offer, result);
+        log("warn", "provider_retryable_failure", {
           request_id: job.id,
           relay_model: offer.modelId,
           provider: provider.id,
-          error: error instanceof Error ? error.message : String(error),
+          offer_kind: offer.kind,
+          scope: result.scope,
+          reason: result.reason,
+          retry_count: retryCount,
+          retry_budget: MAX_RETRYABLE_FAILURES_PER_PATH,
+          retry_at: Number.isFinite(result.retryAt) ? new Date(result.retryAt).toISOString() : null,
+          attempt_ms: Date.now() - startedAt,
         });
-        if (!job.response.writableEnded && !job.response.destroyed) job.response.end();
+        this.markFailureAndRequeue(job);
+        return;
+      }
+
+      if (result.status === "rejected") {
+        this.observability.failedAttempt(provider.id, offer.modelId);
+        log("warn", "provider_rejected", {
+          request_id: job.id,
+          relay_model: offer.modelId,
+          provider: provider.id,
+          offer_kind: offer.kind,
+          scope: result.scope,
+          status: result.httpStatus,
+          detail: upstreamRejectionDetail(result.bodyText),
+          attempt_ms: Date.now() - startedAt,
+        });
+        if (isAutoModel(job.requestedModel)) {
+          if (result.scope === "provider") job.excludedProviderIds.add(provider.id);
+          else job.excludedModelIds.add(offer.modelId);
+          job.lastRetryFailure = undefined;
+          this.markFailureAndRequeue(job);
+        } else {
+          this.observability.terminalFailure(provider.id, offer.modelId);
+          this.terminalForJob(job, result.httpStatus, result.bodyText);
+        }
+        return;
+      }
+
+      log("info", "upstream_response", {
+        request_id: job.id,
+        relay_model: offer.modelId,
+        provider: provider.id,
+        offer_kind: offer.kind,
+        input_tokens: offer.inputTokens,
+        status: result.response.status,
+        connect_ms: Date.now() - startedAt,
+      });
+
+      try {
+        if (job.stream) await this.forwardStream(job, offer.modelId, result.response);
+        else {
+          const text = await result.response.text();
+          if (!job.cancelled && !job.response.writableEnded && !job.response.destroyed) job.response.end(text);
+        }
+        if (job.cancelled) return;
+        const usage = await result.usage?.catch(() => undefined);
+        this.observability.success(provider.id, offer.modelId, offer.inputTokens, usage);
+        const totalTokens = usage?.totalTokens
+          ?? (usage?.outputTokens !== undefined ? offer.inputTokens + usage.outputTokens : undefined);
+        log("info", "request_complete", {
+          request_id: job.id,
+          relay_model: offer.modelId,
+          provider: provider.id,
+          offer_kind: offer.kind,
+          provider_priority: offer.providerPriority,
+          input_tokens: offer.inputTokens,
+          input_capacity_tokens: offer.inputCapacityTokens,
+          output_tokens: usage?.outputTokens ?? null,
+          total_tokens: totalTokens ?? null,
+          failovers: job.failureCount,
+          attempt_ms: Date.now() - startedAt,
+          total_ms: Date.now() - job.enqueuedAt,
+        });
+      } catch (error) {
+        if (!job.cancelled) {
+          this.observability.failedAttempt(provider.id, offer.modelId);
+          this.observability.terminalFailure(provider.id, offer.modelId);
+          log("warn", "upstream_body_error", {
+            request_id: job.id,
+            relay_model: offer.modelId,
+            provider: provider.id,
+            error: error instanceof Error ? error.message : String(error),
+          });
+          if (!job.response.writableEnded && !job.response.destroyed) job.response.end();
+        }
+      } finally {
+        result.release();
       }
     } finally {
-      result.release();
+      clearTimeout(timeout);
+      if (job.upstreamAbort === controller) job.upstreamAbort = undefined;
     }
   }
 
