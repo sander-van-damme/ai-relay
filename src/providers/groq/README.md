@@ -72,8 +72,9 @@ Known incompatible request shapes are rejected during offer evaluation rather th
 - relay-specific `documents` and `chat_template_kwargs` are not routed because the provider has no proven matching token-count representation for them;
 - tools, when present, must be OpenAI function tools;
 - explicit `service_tier: "flex"` or `"performance"` is not routed by this Free-plan provider;
-- GPT-OSS routes do not advertise requests that explicitly require parallel tool calls;
-- images route only to Qwen, with at most three images per request.
+- none of the current Free-plan chat routes advertise requests that explicitly require parallel local function calls; for ordinary tool requests the provider sends `parallel_tool_calls=false` to avoid Groq's default `true` on models that do not support it;
+- images route only to Qwen, with at most three images per request;
+- `max_completion_tokens` / `max_tokens`, when supplied, must fit the selected model's published max output.
 
 Reasoning support is model-specific:
 
