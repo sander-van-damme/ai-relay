@@ -67,11 +67,11 @@ Known incompatible request shapes are rejected during offer evaluation rather th
 - `messages[].name` is not routed;
 - `n` must be absent or `1`;
 - non-zero frequency/presence penalties are not routed;
-- `metadata` is not routed;
+- `metadata` and `store` are not routed;
 - `include_reasoning` and `reasoning_format` may not both be set;
-- relay-specific `documents` and `chat_template_kwargs` are not routed because the provider has no proven matching token-count representation for them;
+- `documents`, `chat_template_kwargs`, Compound/search extensions, and deprecated `functions` / `function_call` are not routed because this provider does not have a proven matching token-count/rendering path for them;
 - tools, when present, must be OpenAI function tools;
-- explicit `service_tier: "flex"` or `"performance"` is not routed by this Free-plan provider;
+- Free-plan routing accepts only the default/on-demand service-tier behavior (`auto`, `on_demand`, or omitted);
 - none of the current Free-plan chat routes advertise requests that explicitly require parallel local function calls; for ordinary tool requests the provider sends `parallel_tool_calls=false` to avoid Groq's default `true` on models that do not support it;
 - images route only to Qwen, with at most three images per request;
 - `max_completion_tokens` / `max_tokens`, when supplied, must fit the selected model's published max output.
