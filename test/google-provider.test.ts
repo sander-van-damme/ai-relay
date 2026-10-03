@@ -553,6 +553,57 @@ test("Antigravity validation repair stays inside the same temporary interaction"
   }
 });
 
+test("Antigravity invalid completion exhaustion enters model cooldown", async () => {
+  const originalKey = process.env.GEMINI_API_KEY;
+  process.env.GEMINI_API_KEY = "test";
+  let call = 0;
+
+  try {
+    const provider = new GoogleProvider(
+      () => fakeClient((request) => {
+        call += 1;
+        return manualAntigravityInteraction(
+          `agent-invalid-${call}`,
+          "{still not valid JSON}",
+          "env-invalid",
+        );
+      }),
+      [ANTIGRAVITY_MODEL],
+    );
+
+    const body = { messages: [{ role: "user", content: "Hello" }] };
+    const offer = (await bestOffer(provider, {
+      ...standardRequest,
+      body,
+      requestedModel: ANTIGRAVITY_MODEL.id,
+    }, Date.now()))!;
+
+    const before = Date.now();
+    const result = await provider.execute(offer, body, false, new AbortController().signal);
+    assert.equal(result.status, "retryable");
+    if (result.status !== "retryable") return;
+    assert.equal(result.scope, "model");
+    assert.equal(result.reason, "invalid_completion_response");
+    assert.ok(result.retryAt >= before + 4_000);
+    assert.equal(call, 3);
+
+    const blockedUntil = provider.status().models[0]?.blockedUntil;
+    assert.equal(blockedUntil, result.retryAt);
+
+    const blockedOffer = await bestOffer(provider, {
+      ...standardRequest,
+      body,
+      requestedModel: ANTIGRAVITY_MODEL.id,
+    }, before);
+    assert.ok(blockedOffer);
+    assert.equal(blockedOffer.modelId, ANTIGRAVITY_MODEL.id);
+    assert.equal(blockedOffer.availableAt, result.retryAt);
+  } finally {
+    if (originalKey === undefined) delete process.env.GEMINI_API_KEY;
+    else process.env.GEMINI_API_KEY = originalKey;
+  }
+});
+
 test("Gemini replays external tool history through GenerateContent and keeps native continuation", async () => {
   const originalKey = process.env.GEMINI_API_KEY;
   process.env.GEMINI_API_KEY = "test";
