@@ -219,7 +219,7 @@ test("NVIDIA streaming requests usage and preserves downstream SSE bytes", async
     };
     const sse = [
       'data: {"id":"chatcmpl-test","choices":[{"index":0,"delta":{"content":"hello"}}]}\n\n',
-      \`data: \${JSON.stringify({ id: "chatcmpl-test", choices: [], usage })}\n\n\`,
+      `data: ${JSON.stringify({ id: "chatcmpl-test", choices: [], usage })}\n\n`,
       "data: [DONE]\n\n",
     ].join("");
     const bytes = new TextEncoder().encode(sse);
@@ -271,7 +271,7 @@ test("NVIDIA streaming requests usage and preserves downstream SSE bytes", async
     };
     const expectedSse = [
       'data: {"id":"chatcmpl-test","choices":[{"index":0,"delta":{"content":"hello"}}]}\n\n',
-      \`data: \${JSON.stringify({ id: "chatcmpl-test", choices: [], usage: expectedUsage })}\n\n\`,
+      `data: ${JSON.stringify({ id: "chatcmpl-test", choices: [], usage: expectedUsage })}\n\n`,
       "data: [DONE]\n\n",
     ].join("");
 
