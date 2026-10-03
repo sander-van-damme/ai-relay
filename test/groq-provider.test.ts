@@ -95,6 +95,9 @@ test("known unsupported requests, GPT vision requests, and overflow do not produ
     const provider = gptOnly();
     for (const request of [
       { ...baseRequest, body: { ...body, logprobs: true } },
+      { ...baseRequest, body: { ...body, store: true } },
+      { ...baseRequest, body: { ...body, functions: [{ name: "legacy", parameters: { type: "object" } }] } },
+      { ...baseRequest, body: { ...body, service_tier: "flex" } },
       { ...baseRequest, requestedModel: "groq/openai/gpt-oss-20b", body: { ...body, max_completion_tokens: 65_537 } },
       { ...baseRequest, requestedModel: "groq/openai/gpt-oss-20b", body: { messages: [{ role: "user", content: [{ type: "image_url", image_url: { url: "https://example.com/a.png" } }] }] } },
       { ...baseRequest, offerKind: "overflow" as const },
