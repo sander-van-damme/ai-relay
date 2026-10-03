@@ -35,6 +35,7 @@ export interface GroqModel {
   maxOutputTokens: number;
   preference: number;
   vision: boolean;
+  parallelToolCalls: boolean;
   reasoningEfforts: readonly string[];
   quota: QuotaPolicy;
   tokensPerDay: number;
@@ -63,6 +64,7 @@ export const GROQ_MODELS: readonly GroqModel[] = [
     maxOutputTokens: 65_536,
     preference: 300,
     vision: false,
+    parallelToolCalls: false,
     reasoningEfforts: ["low", "medium", "high"],
     quota: freeQuota(),
     tokensPerDay: 200_000,
@@ -75,6 +77,7 @@ export const GROQ_MODELS: readonly GroqModel[] = [
     maxOutputTokens: 16_384,
     preference: 200,
     vision: true,
+    parallelToolCalls: false,
     reasoningEfforts: ["none", "default", "low", "medium", "high"],
     quota: freeQuota(),
     tokensPerDay: 200_000,
@@ -91,6 +94,7 @@ export const GROQ_MODELS: readonly GroqModel[] = [
     maxOutputTokens: 65_536,
     preference: 100,
     vision: false,
+    parallelToolCalls: false,
     reasoningEfforts: ["low", "medium", "high"],
     quota: freeQuota(),
     tokensPerDay: 200_000,
@@ -146,17 +150,28 @@ function knownUnsupported(body: ChatCompletionRequest): boolean {
   return false;
 }
 
+function requestedOutputTokens(body: ChatCompletionRequest): number | null {
+  const raw = body.max_completion_tokens ?? body.max_tokens;
+  if (raw == null) return null;
+  return typeof raw === "number" && Number.isSafeInteger(raw) && raw > 0 ? raw : Number.NaN;
+}
+
 function supports(model: GroqModel, body: ChatCompletionRequest): boolean {
   if (knownUnsupported(body)) return false;
   const images = imageCount(body);
   if (images > 0 && (!model.vision || images > 3)) return false;
+
+  const outputTokens = requestedOutputTokens(body);
+  if (outputTokens !== null && (!Number.isFinite(outputTokens) || outputTokens > model.maxOutputTokens)) return false;
+
   const effort = body.reasoning_effort;
   if (effort != null && (typeof effort !== "string" || !model.reasoningEfforts.includes(effort))) return false;
+
   if (
     body.parallel_tool_calls === true
     && Array.isArray(body.tools)
     && body.tools.length > 0
-    && model.upstreamModel.startsWith("openai/gpt-oss-")
+    && !model.parallelToolCalls
   ) return false;
   return true;
 }
@@ -449,6 +464,9 @@ export class GroqProvider implements Provider {
           ...body,
           model: model.upstreamModel,
           stream,
+          ...(Array.isArray(body.tools) && body.tools.length > 0 && !model.parallelToolCalls
+            ? { parallel_tool_calls: false }
+            : {}),
           ...(stream ? { stream_options: { ...streamOptions, include_usage: true } } : {}),
         }),
         signal,
