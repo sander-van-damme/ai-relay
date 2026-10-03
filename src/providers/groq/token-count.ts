@@ -226,6 +226,7 @@ function qwenTemplateKwargs(body: ChatCompletionRequest): Record<string, unknown
 }
 
 function countGptOss(body: ChatCompletionRequest): number {
+  messages(body);
   if (!countGptOssChatCompletionTokens) {
     throw new Error("gpt-tokenizer does not expose chat-completion counting for GPT-OSS.");
   }
