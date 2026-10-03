@@ -387,9 +387,12 @@ function streamIncludesUsage(body: ChatCompletionRequest): boolean {
 function observedUsage(rawUsage: unknown, generated: boolean): ProviderUsage | undefined {
   const usage = object(rawUsage);
   if (!usage) return undefined;
+  const input = generated ? usage.promptTokenCount : usage.total_input_tokens;
   const output = generated ? usage.candidatesTokenCount : usage.total_output_tokens;
   const total = generated ? usage.totalTokenCount : usage.total_tokens;
+  if (typeof input !== "number" && typeof output !== "number" && typeof total !== "number") return undefined;
   return {
+    ...(typeof input === "number" ? { inputTokens: input } : {}),
     ...(typeof output === "number" ? { outputTokens: output } : {}),
     ...(typeof total === "number" ? { totalTokens: total } : {}),
   };
@@ -1328,7 +1331,9 @@ export class GoogleProvider implements Provider {
     let aggregateInputTokens = 0;
     let aggregateOutputTokens = 0;
     let aggregateTotalTokens = 0;
-    let sawUsage = false;
+    let sawInputUsage = false;
+    let sawOutputUsage = false;
+    let sawTotalUsage = false;
 
     const recordUsage = (interaction: unknown) => {
       const usage = object(object(interaction)?.usage);
@@ -1336,10 +1341,18 @@ export class GoogleProvider implements Provider {
       const input = usage.total_input_tokens;
       const output = usage.total_output_tokens;
       const total = usage.total_tokens;
-      if (typeof input === "number") aggregateInputTokens += input;
-      if (typeof output === "number") aggregateOutputTokens += output;
-      if (typeof total === "number") aggregateTotalTokens += total;
-      sawUsage = true;
+      if (typeof input === "number") {
+        aggregateInputTokens += input;
+        sawInputUsage = true;
+      }
+      if (typeof output === "number") {
+        aggregateOutputTokens += output;
+        sawOutputUsage = true;
+      }
+      if (typeof total === "number") {
+        aggregateTotalTokens += total;
+        sawTotalUsage = true;
+      }
     };
 
     const create = async (
@@ -1408,10 +1421,11 @@ export class GoogleProvider implements Provider {
                 status: 200,
                 headers: { "content-type": "application/json; charset=utf-8" },
               });
-          const providerUsage = sawUsage
+          const providerUsage = sawInputUsage || sawOutputUsage || sawTotalUsage
             ? Promise.resolve({
-                outputTokens: aggregateOutputTokens,
-                totalTokens: aggregateTotalTokens || promptTokens + aggregateOutputTokens,
+                ...(sawInputUsage ? { inputTokens: aggregateInputTokens } : {}),
+                ...(sawOutputUsage ? { outputTokens: aggregateOutputTokens } : {}),
+                ...(sawTotalUsage ? { totalTokens: aggregateTotalTokens } : {}),
               })
             : Promise.resolve(undefined);
           return { response, usage: providerUsage };
