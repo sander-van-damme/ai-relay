@@ -12,7 +12,7 @@ This file preserves the provider/API-key inventory from the previous `cloudflare
 | Vercel AI Gateway | `VERCEL_API_KEY` | OpenAI-compatible gateway |
 | Mistral Studio | `MISTRAL_API_KEY` | OpenAI-compatible API |
 | Arli AI | `ARLIAI_API_KEY` | Legacy provider |
-| NVIDIA NIM / API Catalog | `NVIDIA_API_KEY` | Implementation retained but intentionally disabled pending provider-contract work |
+| NVIDIA NIM / API Catalog | `NVIDIA_API_KEY` | Active in the new relay; direct hosted NVIDIA chat-completions provider with the selected free-endpoint catalog enabled |
 | Kilo AI Gateway | `KILO_API_KEY` | Legacy provider |
 | Kenari | `KENARI_API_KEY` | Legacy provider |
 | LLM7 | `LLM7_API_KEY` | Legacy provider |
