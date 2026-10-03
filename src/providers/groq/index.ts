@@ -142,9 +142,23 @@ function knownUnsupported(body: ChatCompletionRequest): boolean {
   if (body.frequency_penalty != null && body.frequency_penalty !== 0) return true;
   if (body.presence_penalty != null && body.presence_penalty !== 0) return true;
   if (body.n != null && body.n !== 1) return true;
-  if (body.documents !== undefined || body.chat_template_kwargs !== undefined) return true;
+  if (body.store != null) return true;
+
+  // These Groq Chat Completions extensions are either tied to Compound/search
+  // or require request rendering that this provider cannot yet count exactly.
+  if (
+    body.documents !== undefined
+    || body.chat_template_kwargs !== undefined
+    || body.compound_custom !== undefined
+    || body.search_settings !== undefined
+    || body.include_domains !== undefined
+    || body.exclude_domains !== undefined
+    || body.functions !== undefined
+    || body.function_call !== undefined
+  ) return true;
+
   if (body.include_reasoning !== undefined && body.reasoning_format !== undefined) return true;
-  if (body.service_tier === "flex" || body.service_tier === "performance") return true;
+  if (body.service_tier != null && body.service_tier !== "auto" && body.service_tier !== "on_demand") return true;
   if (body.messages.some((message) => object(message)?.name !== undefined)) return true;
   if (body.tools !== undefined && (!Array.isArray(body.tools) || body.tools.some((tool) => object(tool)?.type !== "function"))) return true;
   return false;
