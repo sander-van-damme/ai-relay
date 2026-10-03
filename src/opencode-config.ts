@@ -12,6 +12,7 @@ export const OPTIMIZATIONS = [
   { path: ["tool_output", "max_lines"], value: 1_000 },
   { path: ["tool_output", "max_bytes"], value: 32_768 },
   { path: ["agents", "title", "disabled"], value: true },
+  { path: ["permission", "skill"], value: "deny" },
 ] as const;
 
 const RELAY_AUTO_MODEL_OPTIMIZATIONS = [
@@ -28,7 +29,7 @@ export interface ConfigPaths {
 export interface Change {
   path: string;
   before: unknown;
-  after: boolean | number | string | undefined;
+  after: boolean | number | string;
 }
 
 export interface OptimizeResult extends ConfigPaths {
@@ -174,63 +175,6 @@ function setPath(
   return { text, before: undefined, changed: false };
 }
 
-
-function removePath(
-  text: string,
-  path: readonly string[],
-  expectedValue?: boolean | number | string,
-): { text: string; before: unknown; changed: boolean } {
-  const source = parse(text);
-  let object = rootObject(source);
-
-  for (let index = 0; index < path.length; index += 1) {
-    const name = path[index]!;
-    const property = propertyNamed(object, name);
-    if (!property) return { text, before: undefined, changed: false };
-
-    const isLeaf = index === path.length - 1;
-    if (!isLeaf) {
-      if (!ts.isObjectLiteralExpression(property.initializer)) {
-        return { text, before: undefined, changed: false };
-      }
-      object = property.initializer;
-      continue;
-    }
-
-    const before = decodedValue(property.initializer);
-    if (expectedValue !== undefined && before !== expectedValue) {
-      return { text, before, changed: false };
-    }
-
-    const properties = [...object.properties];
-    const propertyIndex = properties.indexOf(property);
-    let start = property.getStart(source);
-    let end = property.getEnd();
-    const next = properties[propertyIndex + 1];
-    const previous = properties[propertyIndex - 1];
-    const objectClose = object.getEnd() - 1;
-
-    if (next) {
-      const comma = text.indexOf(",", end);
-      if (comma >= 0 && comma < next.getStart(source)) end = comma + 1;
-    } else if (object.properties.hasTrailingComma) {
-      const comma = text.indexOf(",", end);
-      if (comma >= 0 && comma < objectClose) end = comma + 1;
-    } else if (previous) {
-      const comma = text.lastIndexOf(",", start);
-      if (comma >= previous.getEnd()) start = comma;
-    }
-
-    return {
-      text: `${text.slice(0, start)}${text.slice(end)}`,
-      before,
-      changed: true,
-    };
-  }
-
-  return { text, before: undefined, changed: false };
-}
-
 function hasObjectPath(text: string, path: readonly string[]): boolean {
   const source = parse(text);
   let object = rootObject(source);
@@ -248,16 +192,6 @@ export function applyOptimizations(input: string): { text: string; changes: Chan
   let text = input;
   const changes: Change[] = [];
   parse(text);
-
-  // Older optimizer versions disabled OpenCode's skill tool globally. Remove
-  // only that legacy value so Paperclip and other runtimes can load skills on
-  // demand, while preserving any explicit non-deny user preference.
-  const staleSkillDeny = removePath(text, ["permission", "skill"], "deny");
-  text = staleSkillDeny.text;
-  if (staleSkillDeny.changed) {
-    changes.push({ path: "permission.skill", before: staleSkillDeny.before, after: undefined });
-  }
-
   const optimizeRelayAuto = hasObjectPath(text, ["provider", "relay", "models", "auto"]);
   const optimizations = optimizeRelayAuto
     ? [...OPTIMIZATIONS, ...RELAY_AUTO_MODEL_OPTIMIZATIONS]

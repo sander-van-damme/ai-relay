@@ -16,8 +16,7 @@ if (unknown.length > 0) {
       console.log(result.dryRun ? "Would update:" : "Updated:");
       for (const change of result.changes) {
         const oldValue = change.before === undefined ? "missing" : JSON.stringify(change.before);
-        const newValue = change.after === undefined ? "missing" : JSON.stringify(change.after);
-        console.log(`  ${change.path}: ${oldValue} -> ${newValue}`);
+        console.log(`  ${change.path}: ${oldValue} -> ${JSON.stringify(change.after)}`);
       }
       if (result.dryRun) {
         console.log("\nDry run: no files or backup were written.");
