@@ -408,7 +408,8 @@ export class GroqProvider implements Provider {
       ["x-ratelimit-remaining-requests", "x-ratelimit-reset-requests"],
       ["x-ratelimit-remaining-tokens", "x-ratelimit-reset-tokens"],
     ] as const) {
-      if (Number(headers.get(remainingName)) !== 0) continue;
+      const remaining = headers.get(remainingName);
+      if (remaining === null || Number(remaining) !== 0) continue;
       const wait = durationMs(headers.get(resetName));
       if (wait !== undefined) state.blockedUntil = Math.max(state.blockedUntil, now + wait);
     }
@@ -487,9 +488,10 @@ export class GroqProvider implements Provider {
       if (previousProviderFailures > 0 || previousModelFailures > 0) {
         log("info", "provider_recovered", { provider: this.id, relay_model: model.id, provider_failures: previousProviderFailures, model_failures: previousModelFailures });
       }
-      const usagePromise = stream
+      const usagePromise = (stream
         ? this.observeStream(response.clone(), state, event, offer)
-        : this.observeJson(response.clone(), state, event, offer);
+        : this.observeJson(response.clone(), state, event, offer))
+        .catch(() => undefined);
       let released = false;
       return {
         status: "success",
