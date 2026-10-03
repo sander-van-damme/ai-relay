@@ -28,7 +28,6 @@ import type {
 import {
   hasAssistantToolCallsFrom,
   hasGoogleToolHistory,
-  toAntigravityBootstrapBody,
   toGoogleCountInput,
   toGoogleDeveloperCountTokensRequest,
   toGoogleGenerateContentRequest,
@@ -37,6 +36,15 @@ import {
   type GoogleGenerateContentRequest,
   type GoogleInteractionRequest,
 } from "./token-count.ts";
+import {
+  antigravityInteractionText,
+  antigravityManualPrompt,
+  antigravityRepairPrompt,
+  buildRelayChatCompletion,
+  chatCompletionToSse,
+  parseManualChatCompletion,
+  validateManualChatCompletion,
+} from "./antigravity-emulation.ts";
 
 const GOOGLE_DAY = { type: "calendar-day", timeZone: "America/Los_Angeles" } as const;
 const DEFAULT_RETRY_MS = 5_000;
@@ -45,13 +53,7 @@ const CONTINUATION_TTL_MS = 60 * 60 * 1000;
 const MAX_CONTINUATIONS = 1_000;
 const OVERFLOW_LIMITS = new Set<QuotaLimitName>(["requestsPerDay"]);
 const ANTIGRAVITY_AGENT = "antigravity-preview-09-2026";
-const ANTIGRAVITY_SYSTEM_INSTRUCTION = [
-  "You are operating as the reasoning backend for an OpenAI-compatible chat-completions interface.",
-  "Follow the supplied conversation and its instructions.",
-  "Caller-provided function tools operate on the caller's authoritative external environment; use them when appropriate.",
-  "Do not assume access to any filesystem, shell, code-execution environment, or remote environment beyond explicitly supplied tools.",
-  "Google Search is available for public information.",
-].join(" ");
+const ANTIGRAVITY_MAX_REPAIR_ATTEMPTS = 2;
 
 export type GoogleTransport = "interactions" | "generate-content";
 export type GoogleThinkingLevel = "minimal" | "low" | "medium" | "high";
@@ -168,16 +170,10 @@ function canReplayExternalToolHistory(model: GoogleModel): boolean {
 }
 
 function modelSupportsRequest(model: GoogleModel, body: ChatCompletionRequest): boolean {
-  if (model.upstreamAgent) {
-    if (
-      body.temperature !== undefined
-      || body.top_p !== undefined
-      || body.stop !== undefined
-      || body.seed !== undefined
-      || body.reasoning_effort !== undefined
-    ) return false;
-    if (body.tool_choice !== undefined && body.tool_choice !== "auto") return false;
-  }
+  // Antigravity manually emulates the outer Chat Completions request, so request
+  // options are prompt data rather than native Google generation controls.
+  if (model.upstreamAgent) return true;
+
   const effort = body.reasoning_effort;
   if (effort !== undefined) {
     if (effort !== "minimal" && effort !== "low" && effort !== "medium" && effort !== "high") return true;
@@ -187,70 +183,6 @@ function modelSupportsRequest(model: GoogleModel, body: ChatCompletionRequest): 
     return false;
   }
   return true;
-}
-
-interface GoogleAgentInteractionRequest {
-  agent: string;
-  agent_config: {
-    type: "antigravity";
-    model: string;
-    max_total_tokens?: string;
-  };
-  input: GoogleInteractionRequest["input"];
-  store: true;
-  stream: boolean;
-  previous_interaction_id?: string;
-  environment: string;
-  system_instruction?: string;
-  tools: Array<
-    | { type: "google_search" }
-    | NonNullable<GoogleInteractionRequest["tools"]>[number]
-  >;
-  response_format?: GoogleInteractionRequest["response_format"];
-}
-
-function antigravityRequest(
-  request: GoogleInteractionRequest,
-  model: GoogleModel,
-  inputTokens: number,
-  environmentId?: string,
-): GoogleAgentInteractionRequest {
-  if (!model.upstreamAgent) throw new Error(`Google model ${model.id} is not an agent route.`);
-  const unsupported = Object.entries(request.generation_config ?? {})
-    .filter(([key, value]) =>
-      key !== "max_output_tokens"
-      && !(key === "tool_choice" && value === "auto")
-    )
-    .map(([key]) => key);
-  if (unsupported.length > 0) {
-    throw new Error(`Antigravity does not support Chat Completions options: ${unsupported.join(", ")}.`);
-  }
-
-  const maxOutputTokens = request.generation_config?.max_output_tokens;
-  const maxTotalTokens = maxOutputTokens === undefined
-    ? undefined
-    : BigInt(inputTokens) + BigInt(maxOutputTokens);
-  return {
-    agent: model.upstreamAgent,
-    agent_config: {
-      type: "antigravity",
-      model: model.upstreamModel,
-      ...(maxTotalTokens !== undefined ? { max_total_tokens: String(maxTotalTokens) } : {}),
-    },
-    input: request.input,
-    store: true,
-    stream: request.stream,
-    environment: environmentId ?? "remote",
-    ...(request.previous_interaction_id ? { previous_interaction_id: request.previous_interaction_id } : {}),
-    system_instruction: request.system_instruction
-      ? `${ANTIGRAVITY_SYSTEM_INSTRUCTION}\n\n${request.system_instruction}`
-      : ANTIGRAVITY_SYSTEM_INSTRUCTION,
-    tools: [
-      { type: "google_search" },
-      ...(request.tools ?? []),
-    ],
-    ...(request.response_format ? { response_format: request.response_format } : {}),
-  };
 }
 
 function assistantMessageFromInteraction(interaction: unknown): JsonObject {
@@ -546,7 +478,6 @@ interface GoogleRequestPlan {
   target: string;
   continuation?: Continuation;
   replayExternalToolHistory: boolean;
-  bootstrapAntigravity: boolean;
 }
 
 export class GoogleProvider implements Provider {
@@ -625,26 +556,11 @@ export class GoogleProvider implements Provider {
 
   private requestPlan(body: ChatCompletionRequest, model: GoogleModel): GoogleRequestPlan {
     if (model.upstreamAgent) {
-      const target = interactionTarget(model);
-      const candidateContinuation = this.safeContinuation(body, target);
-      const continuation = candidateContinuation?.environmentId ? candidateContinuation : undefined;
-      if (continuation) {
-        return {
-          body,
-          transport: "interactions",
-          target,
-          continuation,
-          replayExternalToolHistory: false,
-          bootstrapAntigravity: false,
-        };
-      }
-      const bootstrapAntigravity = hasGoogleToolHistory(body);
       return {
-        body: bootstrapAntigravity ? toAntigravityBootstrapBody(body) : body,
+        body,
         transport: "interactions",
-        target,
+        target: interactionTarget(model),
         replayExternalToolHistory: false,
-        bootstrapAntigravity,
       };
     }
 
@@ -661,7 +577,6 @@ export class GoogleProvider implements Provider {
         target: generateContentTarget(model),
         continuation: generateContinuation,
         replayExternalToolHistory: false,
-        bootstrapAntigravity: false,
       };
     }
 
@@ -672,7 +587,6 @@ export class GoogleProvider implements Provider {
         target: interactionTarget(model),
         continuation: interactionContinuation,
         replayExternalToolHistory: false,
-        bootstrapAntigravity: false,
       };
     }
 
@@ -687,7 +601,6 @@ export class GoogleProvider implements Provider {
         target: generateContentTarget(model),
         ...(generateContinuation ? { continuation: generateContinuation } : {}),
         replayExternalToolHistory: replayExternalToolHistory && !generateContinuation,
-        bootstrapAntigravity: false,
       };
     }
 
@@ -709,7 +622,6 @@ export class GoogleProvider implements Provider {
       plan.target,
       plan.continuation?.inputStartIndex ?? -1,
       plan.replayExternalToolHistory ? "replay" : "native",
-      plan.bootstrapAntigravity ? "bootstrap" : "direct",
     ].join(":");
     let perModel = this.tokenCountCache.get(body);
     if (!perModel) {
@@ -720,21 +632,20 @@ export class GoogleProvider implements Provider {
     if (cached) return cached;
 
     const pending = Promise.resolve().then(async () => {
-      const input = toGoogleCountInput(plan.body);
       if (model.upstreamAgent) {
-        const existingSystem = object(input.config?.systemInstruction);
-        const existingParts = Array.isArray(existingSystem?.parts) ? existingSystem.parts : [];
-        input.config = {
-          ...input.config,
-          systemInstruction: {
-            parts: [{ text: ANTIGRAVITY_SYSTEM_INSTRUCTION }, ...existingParts as any[]],
-          },
-          tools: [
-            ...(input.config?.tools ?? []),
-            { googleSearch: {} },
-          ],
-        };
+        const prompt = antigravityManualPrompt(plan.body);
+        const response = await this.googleClient().models.countTokens({
+          model: model.upstreamModel,
+          contents: [{ role: "user", parts: [{ text: prompt }] }],
+          config: { abortSignal: AbortSignal.timeout(10_000) },
+        });
+        if (!Number.isSafeInteger(response.totalTokens) || (response.totalTokens ?? -1) < 0) {
+          throw new Error(`Google did not return a valid token count for ${model.upstreamModel}.`);
+        }
+        return response.totalTokens!;
       }
+
+      const input = toGoogleCountInput(plan.body);
       let contents = input.contents;
       if (plan.transport === "generate-content") {
         const request = toGoogleGenerateContentRequest(
@@ -749,7 +660,7 @@ export class GoogleProvider implements Provider {
         contents = request.contents;
       } else if (
         hasGoogleToolHistory(plan.body)
-        && (model.upstreamAgent || canReplayExternalToolHistory(model))
+        && canReplayExternalToolHistory(model)
       ) {
         // Google-native signatures are not representable in OpenAI tool_calls.
         // Count an equivalent replay-safe Gemini request instead.
