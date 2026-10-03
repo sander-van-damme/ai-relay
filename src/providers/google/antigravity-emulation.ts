@@ -76,6 +76,8 @@ The JSON inside this envelope is the response AI Relay intends to return to the 
 
 Focus on the semantic response: choices, assistant messages, content, tool calls, and finish reasons. You do not need to provide transport metadata such as id, object, created, model, or usage. If you do provide those fields, that is fine: AI Relay will ignore and replace them with its own authoritative metadata.
 
+Even if the outer request contains `"stream": true`, do not manually emulate HTTP/SSE streaming and do not emit partial Chat Completions chunks. Produce one complete semantic Chat Completions response inside the final envelope. AI Relay is responsible for translating that validated response into the caller's streaming wire format.
+
 The JSON must be syntactically valid and represent a valid OpenAI-compatible Chat Completions response. If a tool call is needed, use only a tool defined in the outer request, reproduce its name exactly, and provide its arguments as the JSON string required by Chat Completions. Return the tool call; do not fabricate the result of that outer tool call.
 
 Do not emit the final envelope until you are ready to provide the response.
