@@ -149,14 +149,46 @@ function messages(body: ChatCompletionRequest): unknown[] {
   return body.messages;
 }
 
-function tools(body: ChatCompletionRequest): unknown[] | undefined {
-  return Array.isArray(body.tools) ? body.tools : undefined;
-}
-
 function object(value: unknown): Record<string, unknown> | null {
   return typeof value === "object" && value !== null && !Array.isArray(value)
     ? value as Record<string, unknown>
     : null;
+}
+
+function qwenMessages(body: ChatCompletionRequest): unknown[] {
+  return messages(body).map((rawMessage) => {
+    const message = object(rawMessage);
+    if (!message || !Array.isArray(message.tool_calls)) return rawMessage;
+
+    return {
+      ...message,
+      tool_calls: message.tool_calls.map((rawCall) => {
+        const call = object(rawCall);
+        const fn = object(call?.function);
+        if (!call || !fn || typeof fn.arguments !== "string") return rawCall;
+
+        let parsedArguments: unknown;
+        try {
+          parsedArguments = JSON.parse(fn.arguments) as unknown;
+        } catch {
+          throw new Error("Qwen token counting requires tool-call arguments to contain valid JSON.");
+        }
+        const args = object(parsedArguments);
+        if (!args) {
+          throw new Error("Qwen token counting requires tool-call arguments to decode to a JSON object.");
+        }
+
+        return {
+          ...call,
+          function: { ...fn, arguments: args },
+        };
+      }),
+    };
+  });
+}
+
+function tools(body: ChatCompletionRequest): unknown[] | undefined {
+  return Array.isArray(body.tools) ? body.tools : undefined;
 }
 
 function imageCount(body: ChatCompletionRequest): number {
@@ -218,7 +250,7 @@ async function countHuggingFaceChat(
   const requestTools = tools(body);
   const requestDocuments = Array.isArray(body.documents) ? body.documents : undefined;
 
-  const rendered = tokenizer.apply_chat_template(messages(body), {
+  const rendered = tokenizer.apply_chat_template(qwenMessages(body), {
     ...qwenTemplateKwargs(body),
     tokenize: true,
     return_tensor: false,
