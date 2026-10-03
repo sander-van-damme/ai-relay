@@ -17,13 +17,29 @@ interface Counters {
   cancellations: number;
   attempts: number;
   failedAttempts: number;
-  inputTokens: number;
-  outputTokens: number;
-  totalTokens: number;
+  routingInputTokens: number;
+  upstreamInputTokens: number | null;
+  upstreamOutputTokens: number | null;
+  upstreamTotalTokens: number | null;
 }
 
 function counters(): Counters {
-  return { requests: 0, successes: 0, terminalFailures: 0, cancellations: 0, attempts: 0, failedAttempts: 0, inputTokens: 0, outputTokens: 0, totalTokens: 0 };
+  return {
+    requests: 0,
+    successes: 0,
+    terminalFailures: 0,
+    cancellations: 0,
+    attempts: 0,
+    failedAttempts: 0,
+    routingInputTokens: 0,
+    upstreamInputTokens: null,
+    upstreamOutputTokens: null,
+    upstreamTotalTokens: null,
+  };
+}
+
+function addObserved(current: number | null, value: number | undefined): number | null {
+  return value === undefined ? current : (current ?? 0) + value;
 }
 
 export class Observability {
@@ -64,8 +80,7 @@ export class Observability {
     for (const item of [this.totals, this.providers.get(providerId), model]) {
       if (!item) continue;
       item.attempts += 1;
-      item.inputTokens += inputTokens;
-      item.totalTokens += inputTokens;
+      item.routingInputTokens += inputTokens;
     }
   }
 
@@ -76,14 +91,14 @@ export class Observability {
     }
   }
 
-  success(providerId: string, modelId: string, inputTokens: number, usage?: ProviderUsage): void {
+  success(providerId: string, modelId: string, usage?: ProviderUsage): void {
     const model = this.models.get(modelId);
     for (const item of [this.totals, this.providers.get(providerId), model]) {
       if (!item) continue;
       item.successes += 1;
-      if (usage?.outputTokens !== undefined) item.outputTokens += usage.outputTokens;
-      if (usage?.totalTokens !== undefined) item.totalTokens += usage.totalTokens - inputTokens;
-      else if (usage?.outputTokens !== undefined) item.totalTokens += usage.outputTokens;
+      item.upstreamInputTokens = addObserved(item.upstreamInputTokens, usage?.inputTokens);
+      item.upstreamOutputTokens = addObserved(item.upstreamOutputTokens, usage?.outputTokens);
+      item.upstreamTotalTokens = addObserved(item.upstreamTotalTokens, usage?.totalTokens);
     }
   }
 
