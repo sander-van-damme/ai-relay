@@ -95,6 +95,7 @@ test("known unsupported requests, GPT vision requests, and overflow do not produ
     const provider = gptOnly();
     for (const request of [
       { ...baseRequest, body: { ...body, logprobs: true } },
+      { ...baseRequest, requestedModel: "groq/openai/gpt-oss-20b", body: { ...body, max_completion_tokens: 65_537 } },
       { ...baseRequest, requestedModel: "groq/openai/gpt-oss-20b", body: { messages: [{ role: "user", content: [{ type: "image_url", image_url: { url: "https://example.com/a.png" } }] }] } },
       { ...baseRequest, offerKind: "overflow" as const },
     ]) {
@@ -140,6 +141,30 @@ test("successful execution uses Groq auth/endpoint/model and reports usage", asy
     assert.equal(provider.status().models.find((model) => model.id === selected.modelId)?.active, 1);
     result.release();
     assert.equal(provider.status().models.find((model) => model.id === selected.modelId)?.active, 0);
+  } finally { globalThis.fetch = originalFetch; restore(); }
+});
+
+test("Groq disables parallel function calls for current non-parallel models", async () => {
+  const restore = installKey();
+  const originalFetch = globalThis.fetch;
+  const toolBody = {
+    messages: [{ role: "user", content: "weather?" }],
+    tools: [{ type: "function", function: { name: "weather", parameters: { type: "object", properties: {} } } }],
+  };
+  globalThis.fetch = async (_input, init) => {
+    const request = JSON.parse(String(init?.body)) as Record<string, unknown>;
+    assert.equal(request.parallel_tool_calls, false);
+    return jsonResponse({ choices: [], usage: { prompt_tokens: 1, completion_tokens: 0, total_tokens: 1 } });
+  };
+  try {
+    const provider = gptOnly();
+    const selected = await offer(provider, "groq/openai/gpt-oss-20b", toolBody);
+    const result = await provider.execute(selected, toolBody, false, new AbortController().signal);
+    assert.equal(result.status, "success");
+    if (result.status === "success") {
+      await result.usage;
+      result.release();
+    }
   } finally { globalThis.fetch = originalFetch; restore(); }
 });
 
