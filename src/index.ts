@@ -4,6 +4,7 @@ import { createReadStream } from "node:fs";
 import { loadConfig } from "./config.ts";
 import { log, sessionLogFilename, sessionLogPath } from "./log.ts";
 import { isAutoModel, RelayScheduler } from "./relay.ts";
+import { modelPayload, modelsPayload } from "./models-api.ts";
 import type { ChatCompletionRequest, RelayJob } from "./types.ts";
 import { OBSERVABILITY_HTML } from "./dashboard.ts";
 
@@ -61,20 +62,6 @@ function startPersistentResponse(response: ServerResponse, stream: boolean, hear
   return timer;
 }
 
-function modelsPayload(scheduler: RelayScheduler): Record<string, unknown> {
-  const created = Math.floor(Date.now() / 1000);
-  const concrete = scheduler.listModels().map((model) => ({
-    id: model.id,
-    object: "model",
-    created,
-    owned_by: model.providerId,
-  }));
-  return {
-    object: "list",
-    data: [{ id: "auto", object: "model", created, owned_by: "ai-relay" }, ...concrete],
-  };
-}
-
 async function main(): Promise<void> {
   const config = await loadConfig();
   const scheduler = new RelayScheduler(config);
@@ -94,7 +81,7 @@ async function main(): Promise<void> {
       json(response, 200, {
         name: "ai-relay",
         mode: "provider-offer-scheduler",
-        endpoints: ["/health", "/v1/models", "/v1/chat/completions", "/observability", "/observability/stats", "/observability/logs"],
+        endpoints: ["/health", "/v1/models", "/v1/models/{model}", "/v1/chat/completions", "/observability", "/observability/stats", "/observability/logs"],
       });
       return;
     }
@@ -104,6 +91,23 @@ async function main(): Promise<void> {
     }
     if (request.method === "GET" && url.pathname === "/v1/models") {
       json(response, 200, modelsPayload(scheduler));
+      return;
+    }
+    if (request.method === "GET" && url.pathname.startsWith("/v1/models/")) {
+      let modelId: string;
+      try {
+        modelId = decodeURIComponent(url.pathname.slice("/v1/models/".length));
+      } catch {
+        openAiHttpError(response, 400, "invalid_model", "Model ID must be valid URL encoding.");
+        return;
+      }
+
+      const model = modelId ? modelPayload(scheduler, modelId) : null;
+      if (!model) {
+        openAiHttpError(response, 404, "model_not_found", `Configured model not found: ${modelId || "(empty)"}`);
+        return;
+      }
+      json(response, 200, model);
       return;
     }
     if (request.method === "GET" && url.pathname === "/observability") {

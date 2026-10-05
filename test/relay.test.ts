@@ -62,7 +62,9 @@ function job(id: string, response: FakeResponse): RelayJob {
 }
 
 class FakeProvider implements Provider {
-  private blockedUntil = 0;
+  blockedUntil = 0;
+  modelBlockedUntil = 0;
+  configured = true;
   private active = false;
   readonly executionOrder: string[] = [];
   failFirstFor = new Set<string>();
@@ -83,7 +85,7 @@ class FakeProvider implements Provider {
     this.capacity = capacity;
   }
 
-  isConfigured(): boolean { return true; }
+  isConfigured(): boolean { return this.configured; }
   listModels(): readonly ProviderModelInfo[] {
     return [{ id: `${this.id}/model`, providerId: this.id, inputCapacityTokens: this.capacity }];
   }
@@ -142,9 +144,14 @@ class FakeProvider implements Provider {
   status(): ProviderStatus {
     return {
       id: this.id,
-      configured: true,
+      configured: this.configured,
       blockedUntil: this.blockedUntil || null,
-      models: [{ id: `${this.id}/model`, active: 0, blockedUntil: null, overflowBlockedUntil: null }],
+      models: [{
+        id: `${this.id}/model`,
+        active: 0,
+        blockedUntil: this.modelBlockedUntil || null,
+        overflowBlockedUntil: null,
+      }],
     };
   }
 }
@@ -234,6 +241,43 @@ test("offer selection waits up to cutoff for smaller capacity", () => {
   const large: ProviderOffer = { kind: "standard", providerId: "nvidia", providerPriority: 20, modelId: "large", inputTokens: 100, inputCapacityTokens: 32_000, availableAt: now };
   assert.equal(selectOffer([small, large], now, 15_000)?.modelId, "small");
   assert.equal(selectOffer([{ ...small, availableAt: now + 30_000 }, large], now, 15_000)?.modelId, "large");
+});
+
+test("configured model catalog excludes providers without credentials", () => {
+  const configured = new FakeProvider("configured", 10, 32_000);
+  const missing = new FakeProvider("missing", 20, 1_048_576);
+  missing.configured = false;
+
+  const scheduler = new RelayScheduler(config(), [configured, missing]);
+
+  assert.deepEqual(
+    scheduler.listConfiguredModels().map((model) => model.id),
+    ["configured/model"],
+  );
+  assert.equal(scheduler.hasModel("configured/model"), true);
+  assert.equal(scheduler.hasModel("missing/model"), false);
+});
+
+test("auto input capacity follows the largest configured model outside failure cooldown", () => {
+  const now = 1_000_000;
+  const small = new FakeProvider("small", 10, 250_000);
+  const large = new FakeProvider("large", 20, 1_048_576);
+  const missing = new FakeProvider("missing", 30, 2_000_000);
+  missing.configured = false;
+
+  const scheduler = new RelayScheduler(config(), [small, large, missing]);
+
+  assert.equal(scheduler.autoInputCapacityTokens(now), 1_048_576);
+
+  large.modelBlockedUntil = now + 30_000;
+  assert.equal(scheduler.autoInputCapacityTokens(now), 250_000);
+
+  large.modelBlockedUntil = 0;
+  large.blockedUntil = now + 30_000;
+  assert.equal(scheduler.autoInputCapacityTokens(now), 250_000);
+
+  small.blockedUntil = now + 30_000;
+  assert.equal(scheduler.autoInputCapacityTokens(now), null);
 });
 
 test("a failed old request yields one dispatch turn to a younger runnable request", async () => {

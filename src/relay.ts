@@ -130,8 +130,34 @@ export class RelayScheduler {
     return this.providers.flatMap((provider) => provider.listModels());
   }
 
+  listConfiguredModels(): Array<{ id: string; providerId: string; inputCapacityTokens: number }> {
+    return this.providers
+      .filter((provider) => provider.isConfigured())
+      .flatMap((provider) => provider.listModels());
+  }
+
+  autoInputCapacityTokens(now = Date.now()): number | null {
+    let capacity: number | null = null;
+
+    for (const provider of this.providers) {
+      const status = provider.status(now);
+      if (!status.configured || (status.blockedUntil !== null && status.blockedUntil > now)) continue;
+
+      const healthByModel = new Map(status.models.map((model) => [model.id, model]));
+      for (const model of provider.listModels()) {
+        const health = healthByModel.get(model.id);
+        if (!health || (health.blockedUntil !== null && health.blockedUntil > now)) continue;
+        capacity = capacity === null
+          ? model.inputCapacityTokens
+          : Math.max(capacity, model.inputCapacityTokens);
+      }
+    }
+
+    return capacity;
+  }
+
   hasModel(modelId: string): boolean {
-    return this.listModels().some((model) => model.id === modelId);
+    return this.listConfiguredModels().some((model) => model.id === modelId);
   }
 
   enqueue(job: RelayJob): void {
