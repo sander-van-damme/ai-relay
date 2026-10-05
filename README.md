@@ -86,11 +86,14 @@ AI Relay implements:
 ```text
 GET  /health
 GET  /v1/models
+GET  /v1/models/{model}
 POST /v1/chat/completions
 GET  /observability
 GET  /observability/stats
 GET  /observability/logs
 ```
+
+The Models API follows OpenAI's model/list object shape and additionally exposes `input_capacity_tokens` as a relay extension. Concrete model entries are returned only for configured providers. For concrete models the value is the provider's effective single-request input capacity. For `auto` it is the largest such capacity among configured models that are not currently suppressed by a provider/model failure cooldown. Ordinary quota or concurrency waits do not lower this advertised capacity because those requests can remain queued. If every configured route is in a failure cooldown, `auto` is omitted until a route becomes usable again.
 
 Example:
 
