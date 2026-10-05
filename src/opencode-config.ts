@@ -6,16 +6,16 @@ import ts from "typescript";
 
 export const OPTIMIZATIONS = [
   { path: ["warming"], value: false },
-  { path: ["compaction", "auto"], value: true },
-  { path: ["compaction", "keep", "tokens"], value: 3_000 },
-  { path: ["compaction", "buffer"], value: 4_000 },
   { path: ["tool_output", "max_lines"], value: 1_000 },
   { path: ["tool_output", "max_bytes"], value: 32_768 },
   { path: ["agents", "title", "disabled"], value: true },
-  { path: ["permission", "skill"], value: "deny" },
 ] as const;
 
-const RELAY_AUTO_MODEL_OPTIMIZATIONS = [
+const LEGACY_MANAGED_SETTINGS = [
+  { path: ["compaction", "auto"], value: true },
+  { path: ["compaction", "keep", "tokens"], value: 3_000 },
+  { path: ["compaction", "buffer"], value: 4_000 },
+  { path: ["permission", "skill"], value: "deny" },
   { path: ["provider", "relay", "models", "auto", "limit", "context"], value: 18_000 },
   { path: ["provider", "relay", "models", "auto", "limit", "input"], value: 18_000 },
   { path: ["provider", "relay", "models", "auto", "limit", "output"], value: 4_000 },
@@ -29,7 +29,7 @@ export interface ConfigPaths {
 export interface Change {
   path: string;
   before: unknown;
-  after: boolean | number | string;
+  after: boolean | number | string | undefined;
 }
 
 export interface OptimizeResult extends ConfigPaths {
@@ -175,34 +175,105 @@ function setPath(
   return { text, before: undefined, changed: false };
 }
 
-function hasObjectPath(text: string, path: readonly string[]): boolean {
+function removeProperty(
+  text: string,
+  source: ts.JsonSourceFile,
+  object: ts.ObjectLiteralExpression,
+  property: ts.PropertyAssignment,
+): string {
+  const properties = [...object.properties];
+  const index = properties.indexOf(property);
+  const previous = index > 0 ? properties[index - 1] : undefined;
+  const next = index >= 0 ? properties[index + 1] : undefined;
+
+  if (next) {
+    return `${text.slice(0, property.getStart(source))}${text.slice(next.getStart(source))}`;
+  }
+  if (previous) {
+    return `${text.slice(0, previous.getEnd())}${text.slice(property.getEnd())}`;
+  }
+  return `${text.slice(0, object.getStart(source) + 1)}${text.slice(object.getEnd() - 1)}`;
+}
+
+function removeEmptyObjectAtPath(text: string, path: readonly string[]): string {
+  if (path.length === 0) return text;
+
   const source = parse(text);
   let object = rootObject(source);
-  for (const [index, name] of path.entries()) {
-    const property = propertyNamed(object, name);
-    if (!property) return false;
-    if (index === path.length - 1) return ts.isObjectLiteralExpression(property.initializer);
-    if (!ts.isObjectLiteralExpression(property.initializer)) return false;
+
+  for (let index = 0; index < path.length; index += 1) {
+    const property = propertyNamed(object, path[index]!);
+    if (!property) return text;
+
+    const isLeaf = index === path.length - 1;
+    if (isLeaf) {
+      if (!ts.isObjectLiteralExpression(property.initializer) || property.initializer.properties.length > 0) {
+        return text;
+      }
+      return removeProperty(text, source, object, property);
+    }
+
+    if (!ts.isObjectLiteralExpression(property.initializer)) return text;
     object = property.initializer;
   }
-  return false;
+
+  return text;
+}
+
+function removePathIfValue(
+  text: string,
+  path: readonly string[],
+  expected: boolean | number | string,
+): { text: string; before: unknown; changed: boolean } {
+  const source = parse(text);
+  let object = rootObject(source);
+
+  for (let index = 0; index < path.length; index += 1) {
+    const property = propertyNamed(object, path[index]!);
+    if (!property) return { text, before: undefined, changed: false };
+
+    const isLeaf = index === path.length - 1;
+    if (isLeaf) {
+      const before = decodedValue(property.initializer);
+      if (before !== expected) return { text, before, changed: false };
+
+      let updated = removeProperty(text, source, object, property);
+      for (let depth = path.length - 1; depth >= 1; depth -= 1) {
+        updated = removeEmptyObjectAtPath(updated, path.slice(0, depth));
+      }
+      return { text: updated, before, changed: true };
+    }
+
+    if (!ts.isObjectLiteralExpression(property.initializer)) {
+      return { text, before: decodedValue(property.initializer), changed: false };
+    }
+    object = property.initializer;
+  }
+
+  return { text, before: undefined, changed: false };
 }
 
 export function applyOptimizations(input: string): { text: string; changes: Change[] } {
   let text = input;
   const changes: Change[] = [];
   parse(text);
-  const optimizeRelayAuto = hasObjectPath(text, ["provider", "relay", "models", "auto"]);
-  const optimizations = optimizeRelayAuto
-    ? [...OPTIMIZATIONS, ...RELAY_AUTO_MODEL_OPTIMIZATIONS]
-    : OPTIMIZATIONS;
-  for (const optimization of optimizations) {
+
+  for (const legacy of LEGACY_MANAGED_SETTINGS) {
+    const result = removePathIfValue(text, legacy.path, legacy.value);
+    text = result.text;
+    if (result.changed) {
+      changes.push({ path: legacy.path.join("."), before: result.before, after: undefined });
+    }
+  }
+
+  for (const optimization of OPTIMIZATIONS) {
     const result = setPath(text, optimization.path, optimization.value);
     text = result.text;
     if (result.changed) {
       changes.push({ path: optimization.path.join("."), before: result.before, after: optimization.value });
     }
   }
+
   parse(text);
   return { text, changes };
 }
