@@ -52,12 +52,9 @@ async function fixture(contents?: string): Promise<{ directory: string; paths: C
 function assertOptimized(value: Record<string, unknown>): void {
   assert.equal(value.warming, false);
   assert.deepEqual(value.tool_output, { max_lines: 1000, max_bytes: 32768 });
-  const compaction = value.compaction as Record<string, unknown>;
-  assert.equal(compaction.auto, true);
-  assert.deepEqual(compaction.keep, { tokens: 3000 });
-  assert.equal(compaction.buffer, 4000);
   assert.deepEqual(value.agents, { title: { disabled: true } });
-  assert.deepEqual(value.permission, { skill: "deny" });
+  assert.equal(value.compaction, undefined);
+  assert.equal(value.permission, undefined);
 }
 
 test("creates a minimal config and missing parent directory", async () => {
@@ -87,17 +84,19 @@ test("preserves unrelated configuration", () => {
   assert.deepEqual(value.plugins, ["example"]);
 });
 
-test("merges nested compaction settings instead of replacing them", () => {
-  const value = parseJsonc(applyOptimizations('{ "compaction": { "prune": true, "keep": { "messages": 4 } } }').text);
+test("leaves user-defined compaction settings alone", () => {
+  const value = parseJsonc(applyOptimizations(
+    '{ "compaction": { "auto": false, "prune": true, "keep": { "messages": 4, "tokens": 12000 }, "buffer": 8000 } }',
+  ).text);
   assert.deepEqual(value.compaction, {
+    auto: false,
     prune: true,
-    keep: { messages: 4, tokens: 3000 },
-    auto: true,
-    buffer: 4000,
+    keep: { messages: 4, tokens: 12000 },
+    buffer: 8000,
   });
 });
 
-test("sets a conservative working envelope for an existing relay auto model", () => {
+test("does not add relay auto-model context or output limits", () => {
   const original = `{
   "provider": {
     "relay": {
@@ -118,16 +117,84 @@ test("sets a conservative working envelope for an existing relay auto model", ()
   const auto = models.auto as Record<string, unknown>;
   assert.equal(relay.npm, "@ai-sdk/openai-compatible");
   assert.equal(auto.name, "auto");
-  assert.deepEqual(auto.limit, {
-    context: 18000,
-    input: 18000,
-    output: 4000,
-  });
+  assert.equal(auto.limit, undefined);
 });
 
-test("does not create a relay provider solely for compaction limits", () => {
-  const value = parseJsonc(applyOptimizations("{}\n").text);
-  assert.equal(value.provider, undefined);
+test("removes legacy relay-managed compaction, skill, and model-limit settings", () => {
+  const original = `{
+  "warming": false,
+  "compaction": {
+    "auto": true,
+    "prune": true,
+    "keep": { "messages": 4, "tokens": 3000 },
+    "buffer": 4000
+  },
+  "tool_output": { "max_lines": 1000, "max_bytes": 32768 },
+  "agents": { "title": { "disabled": true } },
+  "permission": { "bash": "allow", "skill": "deny" },
+  "provider": {
+    "relay": {
+      "models": {
+        "auto": {
+          "name": "auto",
+          "limit": { "context": 18000, "input": 18000, "output": 4000 }
+        }
+      }
+    }
+  }
+}\n`;
+  const result = applyOptimizations(original);
+  const value = parseJsonc(result.text);
+
+  assert.deepEqual(value.compaction, {
+    prune: true,
+    keep: { messages: 4 },
+  });
+  assert.deepEqual(value.permission, { bash: "allow" });
+
+  const provider = value.provider as Record<string, unknown>;
+  const relay = provider.relay as Record<string, unknown>;
+  const models = relay.models as Record<string, unknown>;
+  const auto = models.auto as Record<string, unknown>;
+  assert.deepEqual(auto, { name: "auto" });
+
+  const removed = result.changes
+    .filter((change) => change.after === undefined)
+    .map((change) => change.path);
+  assert.deepEqual(removed, [
+    "compaction.auto",
+    "compaction.keep.tokens",
+    "compaction.buffer",
+    "permission.skill",
+    "provider.relay.models.auto.limit.context",
+    "provider.relay.models.auto.limit.input",
+    "provider.relay.models.auto.limit.output",
+  ]);
+});
+
+test("preserves user-modified values at formerly managed paths", () => {
+  const original = `{
+  "compaction": { "auto": false, "keep": { "tokens": 9000 }, "buffer": 7000 },
+  "permission": { "skill": "allow" },
+  "provider": {
+    "relay": {
+      "models": {
+        "auto": {
+          "limit": { "context": 64000, "input": 64000, "output": 8000 }
+        }
+      }
+    }
+  }
+}\n`;
+  const value = parseJsonc(applyOptimizations(original).text);
+  assert.deepEqual(value.compaction, { auto: false, keep: { tokens: 9000 }, buffer: 7000 });
+  assert.deepEqual(value.permission, { skill: "allow" });
+
+  const provider = value.provider as Record<string, unknown>;
+  const relay = provider.relay as Record<string, unknown>;
+  const models = relay.models as Record<string, unknown>;
+  const auto = models.auto as Record<string, unknown>;
+  assert.deepEqual(auto.limit, { context: 64000, input: 64000, output: 8000 });
 });
 
 test("preserves existing agents", () => {
@@ -138,11 +205,11 @@ test("preserves existing agents", () => {
   });
 });
 
-test("merges skill permission instead of replacing existing permissions", () => {
-  const value = parseJsonc(applyOptimizations('{ "permission": { "bash": "allow" } }').text);
+test("preserves skill permissions instead of managing them", () => {
+  const value = parseJsonc(applyOptimizations('{ "permission": { "bash": "allow", "skill": "allow" } }').text);
   assert.deepEqual(value.permission, {
     bash: "allow",
-    skill: "deny",
+    skill: "allow",
   });
 });
 
@@ -168,7 +235,7 @@ test("optimization is idempotent", () => {
 test("dry run calculates changes without writing config, directory, or backup", async () => {
   const { directory, paths } = await fixture();
   const result = await optimizeConfig(paths, { dryRun: true });
-  assert.equal(result.changes.length, 8);
+  assert.equal(result.changes.length, 4);
   await assert.rejects(access(join(directory, "nested")));
   await assert.rejects(access(paths.configPath));
   await assert.rejects(access(paths.backupPath));
