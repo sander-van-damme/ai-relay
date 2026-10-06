@@ -19,8 +19,11 @@ interface Counters {
   failedAttempts: number;
   routingInputTokens: number;
   upstreamInputTokens: number | null;
+  upstreamInputTokensReported: number;
   upstreamOutputTokens: number | null;
+  upstreamOutputTokensReported: number;
   upstreamTotalTokens: number | null;
+  upstreamTotalTokensReported: number;
 }
 
 function counters(): Counters {
@@ -33,8 +36,11 @@ function counters(): Counters {
     failedAttempts: 0,
     routingInputTokens: 0,
     upstreamInputTokens: null,
+    upstreamInputTokensReported: 0,
     upstreamOutputTokens: null,
+    upstreamOutputTokensReported: 0,
     upstreamTotalTokens: null,
+    upstreamTotalTokensReported: 0,
   };
 }
 
@@ -99,6 +105,9 @@ export class Observability {
       item.upstreamInputTokens = addObserved(item.upstreamInputTokens, usage?.inputTokens);
       item.upstreamOutputTokens = addObserved(item.upstreamOutputTokens, usage?.outputTokens);
       item.upstreamTotalTokens = addObserved(item.upstreamTotalTokens, usage?.totalTokens);
+      if (usage?.inputTokens !== undefined) item.upstreamInputTokensReported += 1;
+      if (usage?.outputTokens !== undefined) item.upstreamOutputTokensReported += 1;
+      if (usage?.totalTokens !== undefined) item.upstreamTotalTokensReported += 1;
     }
   }
 
