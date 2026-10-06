@@ -34,7 +34,7 @@ test("GPT-OSS replay normalization removes only assistant output-only reasoning 
     ],
   });
 
-  assert.equal(body.messages[1]!.reasoning, "private reasoning");
+  assert.equal((body.messages[1] as { reasoning: string }).reasoning, "private reasoning");
 });
 
 test("GPT-OSS replay normalization preserves object identity when no cleanup is needed", () => {
