@@ -140,11 +140,59 @@ test("successful execution uses Groq auth/endpoint/model and reports usage", asy
     const result = await provider.execute(selected, body, false, new AbortController().signal);
     assert.equal(result.status, "success");
     if (result.status !== "success") return;
-    assert.deepEqual(await result.usage, { outputTokens: 5, totalTokens: promptTokens + 5 });
+    assert.deepEqual(await result.usage, { inputTokens: promptTokens, outputTokens: 5, totalTokens: promptTokens + 5 });
     assert.equal(provider.status().models.find((model) => model.id === selected.modelId)?.active, 1);
     result.release();
     assert.equal(provider.status().models.find((model) => model.id === selected.modelId)?.active, 0);
   } finally { globalThis.fetch = originalFetch; restore(); }
+});
+
+test("Groq preserves partial upstream usage without fabricating missing dimensions", async () => {
+  const restore = installKey();
+  const originalFetch = globalThis.fetch;
+  try {
+    let prompt = 0;
+    globalThis.fetch = async () => jsonResponse({
+      choices: [],
+      usage: { prompt_tokens: prompt, total_tokens: prompt + 1 },
+    });
+    const inputAndTotalProvider = gptOnly();
+    const inputAndTotalOffer = await offer(inputAndTotalProvider);
+    prompt = inputAndTotalOffer.inputTokens;
+    const inputAndTotal = await inputAndTotalProvider.execute(
+      inputAndTotalOffer,
+      body,
+      false,
+      new AbortController().signal,
+    );
+    assert.equal(inputAndTotal.status, "success");
+    if (inputAndTotal.status !== "success") return;
+    assert.deepEqual(await inputAndTotal.usage, {
+      inputTokens: prompt,
+      totalTokens: prompt + 1,
+    });
+    inputAndTotal.release();
+
+    globalThis.fetch = async () => jsonResponse({
+      choices: [],
+      usage: { completion_tokens: 3 },
+    });
+    const outputOnlyProvider = gptOnly();
+    const outputOnlyOffer = await offer(outputOnlyProvider);
+    const outputOnly = await outputOnlyProvider.execute(
+      outputOnlyOffer,
+      body,
+      false,
+      new AbortController().signal,
+    );
+    assert.equal(outputOnly.status, "success");
+    if (outputOnly.status !== "success") return;
+    assert.deepEqual(await outputOnly.usage, { outputTokens: 3 });
+    outputOnly.release();
+  } finally {
+    globalThis.fetch = originalFetch;
+    restore();
+  }
 });
 
 test("Groq disables parallel function calls for current non-parallel models", async () => {
@@ -277,7 +325,7 @@ test("Groq streaming hides relay-forced usage while still observing it", async (
     assert.match(downstream, /"content":"hi"/);
     assert.doesNotMatch(downstream, /"choices":\[\],"usage":/);
     assert.match(downstream, /data: \[DONE\]/);
-    assert.deepEqual(await result.usage, { outputTokens: 2, totalTokens: prompt + 2 });
+    assert.deepEqual(await result.usage, { inputTokens: prompt, outputTokens: 2, totalTokens: prompt + 2 });
     result.release();
   } finally { globalThis.fetch = originalFetch; restore(); }
 });
@@ -307,7 +355,7 @@ test("Groq streaming preserves usage when the client requests it", async () => {
     const downstream = await result.response.text();
     assert.match(downstream, /"choices":\[\],"usage":/);
     assert.match(downstream, /data: \[DONE\]/);
-    assert.deepEqual(await result.usage, { outputTokens: 2, totalTokens: prompt + 2 });
+    assert.deepEqual(await result.usage, { inputTokens: prompt, outputTokens: 2, totalTokens: prompt + 2 });
     result.release();
   } finally { globalThis.fetch = originalFetch; restore(); }
 });
