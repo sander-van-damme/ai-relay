@@ -311,28 +311,3 @@ test("Groq streaming preserves usage when the client requests it", async () => {
     result.release();
   } finally { globalThis.fetch = originalFetch; restore(); }
 });
-
-  const restore = installKey();
-  const originalFetch = globalThis.fetch;
-  let prompt = 0;
-  globalThis.fetch = async (_input, init) => {
-    const request = JSON.parse(String(init?.body)) as Record<string, unknown>;
-    assert.deepEqual(request.stream_options, { include_usage: true });
-    return new Response([
-      `data: ${JSON.stringify({ choices: [{ index: 0, delta: { content: "hi" } }] })}\n\n`,
-      `data: ${JSON.stringify({ choices: [], usage: { prompt_tokens: prompt, completion_tokens: 2, total_tokens: prompt + 2 } })}\n\n`,
-      "data: [DONE]\n\n",
-    ].join(""), { headers: { "content-type": "text/event-stream" } });
-  };
-  try {
-    const provider = gptOnly();
-    const selected = await offer(provider);
-    prompt = selected.inputTokens;
-    const result = await provider.execute(selected, body, true, new AbortController().signal);
-    assert.equal(result.status, "success");
-    if (result.status !== "success") return;
-    assert.match(await result.response.text(), /"content":"hi"/);
-    assert.deepEqual(await result.usage, { outputTokens: 2, totalTokens: prompt + 2 });
-    result.release();
-  } finally { globalThis.fetch = originalFetch; restore(); }
-});
