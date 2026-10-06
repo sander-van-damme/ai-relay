@@ -10,6 +10,7 @@ import type {
   ProviderStatus,
   ProviderUsage,
 } from "../shared/types.ts";
+import { observeSseResponse } from "../shared/sse.ts";
 import { countNvidiaInputTokens, type NvidiaTokenizerSpec } from "./token-count.ts";
 
 const NVIDIA_BASE_URL = "https://integrate.api.nvidia.com";
@@ -433,56 +434,30 @@ class NvidiaProvider implements Provider {
       .catch(() => undefined);
   }
 
-  private observeStreamingUsage(response: Response, offer: ProviderOffer): Promise<ProviderUsage | undefined> {
-    if (!response.body) return Promise.resolve(undefined);
-
-    return (async () => {
-      const reader = response.body!.getReader();
-      const decoder = new TextDecoder();
-      let buffer = "";
-      let latestUsage: ProviderUsage | undefined;
-
-      const consumeEvent = (event: string): void => {
-        const data = event
-          .split(/\r\n|\r|\n/)
-          .filter((line) => line.startsWith("data:"))
-          .map((line) => line.slice(5).replace(/^ /, ""))
-          .join("\n")
-          .trim();
-        if (!data || data === "[DONE]") return;
-
-        try {
-          const payload = JSON.parse(data) as unknown;
-          const observed = this.providerUsage(object(payload)?.usage, offer);
-          if (observed) latestUsage = observed;
-        } catch {
-          // Ignore non-JSON SSE data; the downstream branch still receives it unchanged.
-        }
-      };
-
+  private observeStreamingResponse(
+    response: Response,
+    offer: ProviderOffer,
+    includeUsage: boolean,
+  ): { response: Response; usage: Promise<ProviderUsage | undefined> } {
+    const observed = observeSseResponse(response, (data) => {
+      if (data === "[DONE]") return;
       try {
-        for (;;) {
-          const { done, value } = await reader.read();
-          if (done) break;
-          buffer += decoder.decode(value, { stream: true });
+        const payload = object(JSON.parse(data) as unknown);
+        const value = this.providerUsage(payload?.usage, offer);
+        if (!value) return;
 
-          for (;;) {
-            const boundary = /(?:\r\n|\r|\n)(?:\r\n|\r|\n)/.exec(buffer);
-            if (!boundary || boundary.index === undefined) break;
-            consumeEvent(buffer.slice(0, boundary.index));
-            buffer = buffer.slice(boundary.index + boundary[0].length);
-          }
-        }
-
-        buffer += decoder.decode();
-        if (buffer.trim()) consumeEvent(buffer);
-        return latestUsage;
+        const usageOnly = Array.isArray(payload?.choices) && payload.choices.length === 0;
+        return {
+          value,
+          forward: includeUsage || !usageOnly,
+        };
       } catch {
-        return undefined;
-      } finally {
-        reader.releaseLock();
+        // Preserve non-JSON SSE events unchanged.
+        return;
       }
-    })();
+    });
+
+    return { response: observed.response, usage: observed.observed };
   }
 
   async execute(
@@ -552,13 +527,15 @@ class NvidiaProvider implements Provider {
           model_rate_limits: previousRateLimits,
         });
       }
-      const usage = stream
-        ? this.observeStreamingUsage(response.clone(), offer)
-        : this.observeUsage(response.clone(), offer);
+      const clientWantsUsage = object(body.stream_options)?.include_usage === true;
+      const streaming = stream
+        ? this.observeStreamingResponse(response, offer, clientWantsUsage)
+        : undefined;
+      const usage = streaming?.usage ?? this.observeUsage(response.clone(), offer);
       let released = false;
       return {
         status: "success",
-        response,
+        response: streaming?.response ?? response,
         usage,
         release: () => {
           if (released) return;
