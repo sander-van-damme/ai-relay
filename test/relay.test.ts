@@ -159,8 +159,10 @@ class FakeProvider implements Provider {
 
 class StreamingProvider extends FakeProvider {
   releaseCount = 0;
+  cancelCount = 0;
   lastSignal?: AbortSignal;
   stall = false;
+  ignoreAbort = false;
 
   override async execute(
     offer: ProviderOffer,
@@ -175,6 +177,8 @@ class StreamingProvider extends FakeProvider {
 
     const encoder = new TextEncoder();
     const stalled = this.stall;
+    const ignoreAbort = this.ignoreAbort;
+    const provider = this;
     const response = new Response(new ReadableStream<Uint8Array>({
       start(controller) {
         controller.enqueue(encoder.encode('data: {"choices":[]}\\n\\n'));
@@ -183,9 +187,14 @@ class StreamingProvider extends FakeProvider {
           controller.close();
           return;
         }
-        signal.addEventListener("abort", () => {
-          controller.error(signal.reason ?? new Error("aborted"));
-        }, { once: true });
+        if (!ignoreAbort) {
+          signal.addEventListener("abort", () => {
+            controller.error(signal.reason ?? new Error("aborted"));
+          }, { once: true });
+        }
+      },
+      cancel() {
+        provider.cancelCount += 1;
       },
     }));
 
@@ -319,9 +328,10 @@ test("stream keeps upstream abort controller until normal completion", async () 
   assert.equal(request.upstreamAbort, undefined);
 });
 
-test("client cancellation can abort upstream after streaming has started", async () => {
+test("client cancellation exits a stalled non-abort-aware stream read", async () => {
   const provider = new StreamingProvider("stream", 10, 32_000);
   provider.stall = true;
+  provider.ignoreAbort = true;
   const scheduler = new RelayScheduler(config(), [provider]);
   const response = new FakeResponse();
   const request = job("stream-client-cancel", response);
@@ -336,13 +346,15 @@ test("client cancellation can abort upstream after streaming has started", async
   await new Promise((resolve) => setTimeout(resolve, 20));
 
   assert.equal(provider.lastSignal?.aborted, true);
+  assert.equal(provider.cancelCount, 1);
   assert.equal(provider.releaseCount, 1);
   assert.equal(request.upstreamAbort, undefined);
 });
 
-test("upstream timeout remains active after a streaming response starts", async () => {
+test("upstream timeout interrupts a stalled non-abort-aware stream read", async () => {
   const provider = new StreamingProvider("stream", 10, 32_000);
   provider.stall = true;
+  provider.ignoreAbort = true;
   const timeoutConfig = config();
   timeoutConfig.server.upstreamTimeoutSeconds = 0.02;
   const scheduler = new RelayScheduler(timeoutConfig, [provider]);
@@ -354,6 +366,7 @@ test("upstream timeout remains active after a streaming response starts", async 
   await new Promise((resolve) => setTimeout(resolve, 60));
 
   assert.equal(provider.lastSignal?.aborted, true);
+  assert.equal(provider.cancelCount, 1);
   assert.equal(response.writableEnded, true);
   assert.equal(provider.releaseCount, 1);
   assert.equal(request.upstreamAbort, undefined);
