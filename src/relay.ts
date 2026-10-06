@@ -761,4 +761,5 @@ export class RelayScheduler {
         // An aborted pending read may keep the lock until cancellation settles.
       }
     }
-  }}
+  }
+}
