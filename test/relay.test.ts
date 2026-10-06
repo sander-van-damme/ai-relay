@@ -374,7 +374,7 @@ test("client cancellation exits a stalled non-abort-aware stream read", async ()
   assert.equal(request.upstreamAbort, undefined);
 });
 
-test("upstream timeout interrupts a stalled non-abort-aware stream read", async () => {
+test("upstream timeout interrupts a stalled non-abort-aware stream read and logs attempt duration", async () => {
   const provider = new StreamingProvider("stream", 10, 32_000);
   provider.stall = true;
   provider.ignoreAbort = true;
@@ -384,15 +384,67 @@ test("upstream timeout interrupts a stalled non-abort-aware stream read", async 
   const response = new FakeResponse();
   const request = job("stream-timeout", response);
   request.stream = true;
+  const lines: Array<Record<string, unknown>> = [];
+  const originalWarn = console.warn;
+  console.warn = (value?: unknown): void => {
+    if (typeof value !== "string") return;
+    try {
+      const parsed = JSON.parse(value) as Record<string, unknown>;
+      if (parsed.request_id === request.id) lines.push(parsed);
+    } catch {
+      // Ignore unrelated output.
+    }
+  };
 
-  scheduler.enqueue(request);
-  await new Promise((resolve) => setTimeout(resolve, 60));
+  try {
+    scheduler.enqueue(request);
+    await new Promise((resolve) => setTimeout(resolve, 60));
+  } finally {
+    console.warn = originalWarn;
+  }
 
   assert.equal(provider.lastSignal?.aborted, true);
   assert.equal(provider.cancelCount, 1);
   assert.equal(response.writableEnded, true);
   assert.equal(provider.releaseCount, 1);
   assert.equal(request.upstreamAbort, undefined);
+
+  const bodyError = lines.find((line) => line.event === "upstream_body_error");
+  assert.ok(bodyError);
+  assert.equal(typeof bodyError.attempt_ms, "number");
+  assert.ok(Number(bodyError.attempt_ms) >= 10);
+});
+
+test("upstream response timing measures provider readiness latency", async () => {
+  const provider = new FakeProvider("timing", 10, 32_000);
+  provider.executionDelayMs = 25;
+  const scheduler = new RelayScheduler(config(), [provider]);
+  const response = new FakeResponse();
+  const request = job("upstream-ready", response);
+  const lines: Array<Record<string, unknown>> = [];
+  const originalLog = console.log;
+  console.log = (value?: unknown): void => {
+    if (typeof value !== "string") return;
+    try {
+      const parsed = JSON.parse(value) as Record<string, unknown>;
+      if (parsed.request_id === request.id) lines.push(parsed);
+    } catch {
+      // Ignore unrelated output.
+    }
+  };
+
+  try {
+    scheduler.enqueue(request);
+    await new Promise((resolve) => setTimeout(resolve, 60));
+  } finally {
+    console.log = originalLog;
+  }
+
+  const upstreamResponse = lines.find((line) => line.event === "upstream_response");
+  assert.ok(upstreamResponse);
+  assert.equal(typeof upstreamResponse.upstream_ready_ms, "number");
+  assert.ok(Number(upstreamResponse.upstream_ready_ms) >= 15);
+  assert.equal(response.writableEnded, true);
 });
 
 test("retry dispatch timing separates queue wait from request age", async () => {
