@@ -611,12 +611,39 @@ export class RelayScheduler {
     this.observability.attempt(provider.id, offer.modelId, offer.inputTokens);
 
     try {
-      const result = await provider.execute(
-        offer,
-        job.body,
-        job.stream,
-        controller.signal,
-      );
+      let result: ProviderExecutionResult;
+      try {
+        result = await provider.execute(
+          offer,
+          job.body,
+          job.stream,
+          controller.signal,
+        );
+      } catch (error) {
+        if (job.cancelled) return;
+
+        this.observability.failedAttempt(provider.id, offer.modelId);
+        const failure: Extract<ProviderExecutionResult, { status: "retryable" }> = {
+          status: "retryable",
+          scope: "provider",
+          reason: "provider_execute_exception",
+          retryAt: Date.now(),
+        };
+        const retryCount = this.recordRetryableFailure(job, provider, offer, failure);
+        log("warn", "provider_execute_exception", {
+          request_id: job.id,
+          relay_model: offer.modelId,
+          provider: provider.id,
+          offer_kind: offer.kind,
+          error: error instanceof Error ? error.message : String(error),
+          retry_count: retryCount,
+          retry_budget: MAX_RETRYABLE_FAILURES_PER_PATH,
+          attempt_ms: Date.now() - startedAt,
+        });
+        this.markFailureAndRequeue(job);
+        return;
+      }
+
       if (job.cancelled) {
         if (result.status === "success") result.release();
         return;
