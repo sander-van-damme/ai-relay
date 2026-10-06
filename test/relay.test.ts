@@ -449,8 +449,8 @@ test("synchronous provider.execute exceptions fail over under the finite provide
   const response = new FakeResponse();
   const request = job("sync-throw", response);
   const lines: Array<Record<string, unknown>> = [];
-  const originalLog = console.log;
-  console.log = (value?: unknown): void => {
+  const originalWarn = console.warn;
+  console.warn = (value?: unknown): void => {
     if (typeof value !== "string") return;
     try {
       const parsed = JSON.parse(value) as Record<string, unknown>;
@@ -464,7 +464,7 @@ test("synchronous provider.execute exceptions fail over under the finite provide
     scheduler.enqueue(request);
     await new Promise((resolve) => setTimeout(resolve, 50));
   } finally {
-    console.log = originalLog;
+    console.warn = originalWarn;
   }
 
   assert.deepEqual(throwing.executionOrder, ["sync-throw"]);
