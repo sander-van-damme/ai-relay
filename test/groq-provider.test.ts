@@ -251,7 +251,67 @@ test("498 is model-scoped; 5xx is provider-scoped; auth/spend blocks are provide
   } finally { globalThis.fetch = originalFetch; restore(); }
 });
 
-test("streaming forces Groq usage reporting and observes the final usage chunk", async () => {
+test("Groq streaming hides relay-forced usage while still observing it", async () => {
+  const restore = installKey();
+  const originalFetch = globalThis.fetch;
+  let prompt = 0;
+  globalThis.fetch = async (_input, init) => {
+    const request = JSON.parse(String(init?.body)) as Record<string, unknown>;
+    assert.deepEqual(request.stream_options, { include_usage: true });
+    return new Response([
+      `data: ${JSON.stringify({ choices: [{ index: 0, delta: { content: "hi" } }] })}\n\n`,
+      `data: ${JSON.stringify({ choices: [], usage: { prompt_tokens: prompt, completion_tokens: 2, total_tokens: prompt + 2 } })}\n\n`,
+      "data: [DONE]\n\n",
+    ].join(""), { headers: { "content-type": "text/event-stream" } });
+  };
+  try {
+    const provider = gptOnly();
+    const streamBody = { ...body, stream_options: { include_usage: false } };
+    const selected = await offer(provider, "groq/openai/gpt-oss-20b", streamBody);
+    prompt = selected.inputTokens;
+    const result = await provider.execute(selected, streamBody, true, new AbortController().signal);
+    assert.equal(result.status, "success");
+    if (result.status !== "success") return;
+
+    const downstream = await result.response.text();
+    assert.match(downstream, /"content":"hi"/);
+    assert.doesNotMatch(downstream, /"choices":\[\],"usage":/);
+    assert.match(downstream, /data: \[DONE\]/);
+    assert.deepEqual(await result.usage, { outputTokens: 2, totalTokens: prompt + 2 });
+    result.release();
+  } finally { globalThis.fetch = originalFetch; restore(); }
+});
+
+test("Groq streaming preserves usage when the client requests it", async () => {
+  const restore = installKey();
+  const originalFetch = globalThis.fetch;
+  let prompt = 0;
+  globalThis.fetch = async (_input, init) => {
+    const request = JSON.parse(String(init?.body)) as Record<string, unknown>;
+    assert.deepEqual(request.stream_options, { include_usage: true });
+    return new Response([
+      `data: ${JSON.stringify({ choices: [{ index: 0, delta: { content: "hi" } }] })}\n\n`,
+      `data: ${JSON.stringify({ choices: [], usage: { prompt_tokens: prompt, completion_tokens: 2, total_tokens: prompt + 2 } })}\n\n`,
+      "data: [DONE]\n\n",
+    ].join(""), { headers: { "content-type": "text/event-stream" } });
+  };
+  try {
+    const provider = gptOnly();
+    const streamBody = { ...body, stream_options: { include_usage: true } };
+    const selected = await offer(provider, "groq/openai/gpt-oss-20b", streamBody);
+    prompt = selected.inputTokens;
+    const result = await provider.execute(selected, streamBody, true, new AbortController().signal);
+    assert.equal(result.status, "success");
+    if (result.status !== "success") return;
+
+    const downstream = await result.response.text();
+    assert.match(downstream, /"choices":\[\],"usage":/);
+    assert.match(downstream, /data: \[DONE\]/);
+    assert.deepEqual(await result.usage, { outputTokens: 2, totalTokens: prompt + 2 });
+    result.release();
+  } finally { globalThis.fetch = originalFetch; restore(); }
+});
+
   const restore = installKey();
   const originalFetch = globalThis.fetch;
   let prompt = 0;
