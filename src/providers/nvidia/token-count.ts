@@ -1,5 +1,6 @@
 import { countChatCompletionTokens as countGptOss20bChatCompletionTokens } from "gpt-tokenizer/model/gpt-oss-20b";
 import type { ChatCompletionRequest } from "../../types.ts";
+import { normalizeGptOssRequest } from "../shared/gpt-oss.ts";
 
 const TOKENIZER_ASSET_TIMEOUT_MS = 15_000;
 
@@ -174,8 +175,9 @@ function countGptOss20b(body: ChatCompletionRequest): number {
     throw new Error("gpt-tokenizer does not expose chat-completion counting for gpt-oss-20b.");
   }
 
+  const normalized = normalizeGptOssRequest(body);
   const count = countGptOss20bChatCompletionTokens({
-    ...body,
+    ...normalized,
     model: "gpt-oss-20b",
   } as never);
 

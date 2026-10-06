@@ -10,6 +10,7 @@ import type {
   ProviderStatus,
   ProviderUsage,
 } from "../shared/types.ts";
+import { isHarmonyParserFailure, normalizeGptOssRequest } from "../shared/gpt-oss.ts";
 import { observeSseResponse } from "../shared/sse.ts";
 import { countNvidiaInputTokens, type NvidiaTokenizerSpec } from "./token-count.ts";
 
@@ -477,6 +478,9 @@ class NvidiaProvider implements Provider {
     }
 
     const model = this.modelById(offer.modelId);
+    const upstreamBody = model.tokenizer.kind === "gpt-oss-20b"
+      ? normalizeGptOssRequest(body)
+      : body;
     const state = this.modelState(model.id);
     state.active += 1;
 
@@ -492,15 +496,15 @@ class NvidiaProvider implements Provider {
         },
         body: JSON.stringify(stream
           ? {
-              ...body,
+              ...upstreamBody,
               model: model.upstreamModel,
               stream: true,
               stream_options: {
-                ...(object(body.stream_options) ?? {}),
+                ...(object(upstreamBody.stream_options) ?? {}),
                 include_usage: true,
               },
             }
-          : { ...body, model: model.upstreamModel, stream: false }),
+          : { ...upstreamBody, model: model.upstreamModel, stream: false }),
         signal,
       });
     } catch (error) {
@@ -550,6 +554,9 @@ class NvidiaProvider implements Provider {
     const retryAfterMs = parseRetryAfterMs(response.headers.get("retry-after"), DEFAULT_RETRY_MS);
     const failedAt = Date.now();
 
+    if (model.tokenizer.kind === "gpt-oss-20b" && isHarmonyParserFailure(bodyText)) {
+      return { status: "rejected", scope: "model", httpStatus: response.status, bodyText };
+    }
     if (response.status === 429) {
       log("warn", "nvidia_rate_limit_response", {
         provider: this.id,

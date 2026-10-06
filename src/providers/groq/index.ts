@@ -21,6 +21,7 @@ import type {
   ProviderStatus,
   ProviderUsage,
 } from "../shared/types.ts";
+import { isHarmonyParserFailure, normalizeGptOssRequest } from "../shared/gpt-oss.ts";
 import { observeSseResponse, type ObservedSseResponse } from "../shared/sse.ts";
 import { countGroqInputTokens, GROQ_QWEN_IMAGE_TOKENS, type GroqTokenizerSpec } from "./token-count.ts";
 
@@ -479,10 +480,13 @@ export class GroqProvider implements Provider {
     if (!apiKey) return { status: "retryable", scope: "provider", reason: "provider_not_configured", retryAt: Number.POSITIVE_INFINITY };
 
     const model = this.model(offer.modelId);
+    const upstreamBody = model.tokenizer.kind === "gpt-oss"
+      ? normalizeGptOssRequest(body)
+      : body;
     const state = this.state(model.id);
     reserveQuota(model.quota, state, offer.inputTokens, Date.now());
     const event = state.events[state.events.length - 1]!;
-    const streamOptions = object(body.stream_options) ?? {};
+    const streamOptions = object(upstreamBody.stream_options) ?? {};
 
     let response: Response;
     try {
@@ -495,10 +499,10 @@ export class GroqProvider implements Provider {
           "user-agent": "ai-relay/1.0",
         },
         body: JSON.stringify({
-          ...body,
+          ...upstreamBody,
           model: model.upstreamModel,
           stream,
-          ...(Array.isArray(body.tools) && body.tools.length > 0 && !model.parallelToolCalls
+          ...(Array.isArray(upstreamBody.tools) && upstreamBody.tools.length > 0 && !model.parallelToolCalls
             ? { parallel_tool_calls: false }
             : {}),
           ...(stream ? { stream_options: { ...streamOptions, include_usage: true } } : {}),
@@ -545,6 +549,9 @@ export class GroqProvider implements Provider {
     releaseQuota(state);
     const retryMs = parseRetryAfterMs(response.headers.get("retry-after"), DEFAULT_RETRY_MS);
     const code = errorCode(bodyText);
+    if (model.tokenizer.kind === "gpt-oss" && isHarmonyParserFailure(bodyText)) {
+      return { status: "rejected", scope: "model", httpStatus: response.status, bodyText };
+    }
     if (response.status === 429) {
       return { status: "retryable", scope: "model", reason: "rate_limit", retryAt: this.blockModel(model, retryMs, respondedAt, "rate_limit") };
     }

@@ -75,6 +75,8 @@ If no standard offer is usable inside the cutoff, the scheduler checks for immed
 
 Providers maintain their own health/cooldown state. A network failure or upstream `5xx` temporarily suppresses that provider; `429` cools down the affected model with `Retry-After` support and exponential backoff. Retryable failures are scoped to a provider or model. The scheduler prefers another eligible path after a failure and enforces a finite per-request budget of three retryable failures for the same path, so a permanently broken route cannot keep one request alive forever.
 
+GPT-OSS routes receive an additional compatibility normalization for multi-turn Chat Completions: provider-output-only assistant reasoning fields (`reasoning`, `reasoning_content`, and `reasoningContent`) are removed before local token counting and before replaying the conversation upstream. Ordinary message content is never rewritten. Known Harmony parser failures are classified as model-scoped rejections, so an `auto` request immediately excludes that model for the current request and can fail over to another eligible route instead of suppressing the whole provider.
+
 After a failed execution the request keeps its original queue age, but sets a one-shot yield flag. If a younger request is runnable, exactly one younger dispatch may pass before the failed request becomes eligible again. This avoids both extremes: sending a failed request to the back of the queue, or allowing one unstable request to monopolize all dispatches.
 
 The existing work-conserving queue behavior remains: blocked requests may be bypassed so usable quota is not wasted, with a starvation barrier after repeated bypasses.

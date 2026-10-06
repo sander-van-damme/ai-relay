@@ -1,5 +1,6 @@
 import { countChatCompletionTokens as countGptOssChatCompletionTokens } from "gpt-tokenizer/model/gpt-oss-20b";
 import type { ChatCompletionRequest } from "../../types.ts";
+import { normalizeGptOssRequest } from "../shared/gpt-oss.ts";
 
 const TOKENIZER_ASSET_TIMEOUT_MS = 15_000;
 const QWEN_IMAGE_TOKENS = 2_048;
@@ -232,8 +233,9 @@ function countGptOss(body: ChatCompletionRequest): number {
   }
 
   // GPT-OSS 20B and 120B share the same Harmony tokenizer and chat format.
+  const normalized = normalizeGptOssRequest(body);
   const count = countGptOssChatCompletionTokens({
-    ...body,
+    ...normalized,
     model: "gpt-oss-20b",
   } as never);
 

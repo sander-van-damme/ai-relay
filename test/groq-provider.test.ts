@@ -359,3 +359,76 @@ test("Groq streaming preserves usage when the client requests it", async () => {
     result.release();
   } finally { globalThis.fetch = originalFetch; restore(); }
 });
+
+
+test("Groq strips replayed GPT-OSS reasoning fields before sending the next turn", async () => {
+  const restore = installKey();
+  const originalFetch = globalThis.fetch;
+  const replayBody = {
+    messages: [
+      { role: "user", content: "first" },
+      {
+        role: "assistant",
+        content: "visible answer",
+        reasoning: "hidden provider reasoning",
+        reasoning_content: "alternate hidden reasoning",
+      },
+      { role: "user", content: "continue" },
+    ],
+  };
+
+  globalThis.fetch = async (_input, init) => {
+    const request = JSON.parse(String(init?.body)) as {
+      messages: Array<Record<string, unknown>>;
+    };
+    assert.deepEqual(request.messages, [
+      { role: "user", content: "first" },
+      { role: "assistant", content: "visible answer" },
+      { role: "user", content: "continue" },
+    ]);
+    return jsonResponse({ choices: [], usage: { prompt_tokens: 1, completion_tokens: 0, total_tokens: 1 } });
+  };
+
+  try {
+    const provider = gptOnly();
+    const selected = await offer(provider, "groq/openai/gpt-oss-20b", replayBody);
+    const result = await provider.execute(selected, replayBody, false, new AbortController().signal);
+    assert.equal(result.status, "success");
+    if (result.status === "success") {
+      await result.usage;
+      result.release();
+    }
+  } finally {
+    globalThis.fetch = originalFetch;
+    restore();
+  }
+});
+
+test("Groq treats GPT-OSS Harmony parser crashes as model-scoped rejection", async () => {
+  const restore = installKey();
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => jsonResponse({
+    error: {
+      message: 'openai_harmony.HarmonyError: unexpected tokens remaining in message header: Some("to=functions.bash")',
+    },
+  }, 500);
+
+  try {
+    const provider = gptOnly();
+    const result = await provider.execute(
+      await offer(provider),
+      body,
+      false,
+      new AbortController().signal,
+    );
+    assert.equal(result.status, "rejected");
+    if (result.status === "rejected") {
+      assert.equal(result.scope, "model");
+      assert.equal(result.httpStatus, 500);
+    }
+    assert.equal(provider.status().blockedUntil, null);
+  } finally {
+    globalThis.fetch = originalFetch;
+    restore();
+  }
+});
