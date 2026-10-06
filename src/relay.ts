@@ -81,6 +81,31 @@ async function writeChunk(response: ServerResponse, chunk: Uint8Array | string):
   if (!response.write(chunk)) await once(response, "drain");
 }
 
+function abortError(signal: AbortSignal): Error {
+  return signal.reason instanceof Error
+    ? signal.reason
+    : new Error(typeof signal.reason === "string" ? signal.reason : "upstream aborted");
+}
+
+async function readWithAbort(
+  reader: ReadableStreamDefaultReader<Uint8Array>,
+  signal: AbortSignal,
+): Promise<ReadableStreamReadResult<Uint8Array>> {
+  if (signal.aborted) throw abortError(signal);
+
+  let onAbort!: () => void;
+  const aborted = new Promise<never>((_, reject) => {
+    onAbort = () => reject(abortError(signal));
+    signal.addEventListener("abort", onAbort, { once: true });
+  });
+
+  try {
+    return await Promise.race([reader.read(), aborted]);
+  } finally {
+    signal.removeEventListener("abort", onAbort);
+  }
+}
+
 function compareCapacity(left: ProviderOffer, right: ProviderOffer): number {
   return left.inputCapacityTokens - right.inputCapacityTokens
     || left.providerPriority - right.providerPriority
@@ -651,7 +676,7 @@ export class RelayScheduler {
       });
 
       try {
-        if (job.stream) await this.forwardStream(job, offer.modelId, result.response);
+        if (job.stream) await this.forwardStream(job, offer.modelId, result.response, controller.signal);
         else {
           const text = await result.response.text();
           if (!job.cancelled && !job.response.writableEnded && !job.response.destroyed) job.response.end(text);
@@ -695,7 +720,12 @@ export class RelayScheduler {
     }
   }
 
-  private async forwardStream(job: RelayJob, modelId: string, response: Response): Promise<void> {
+  private async forwardStream(
+    job: RelayJob,
+    modelId: string,
+    response: Response,
+    signal: AbortSignal,
+  ): Promise<void> {
     if (!response.body) throw new Error("Upstream streaming response had no body");
     if (job.heartbeatTimer) {
       clearInterval(job.heartbeatTimer);
@@ -705,17 +735,30 @@ export class RelayScheduler {
     const reader = response.body.getReader();
     try {
       for (;;) {
-        const { done, value } = await reader.read();
+        let chunk: ReadableStreamReadResult<Uint8Array>;
+        try {
+          chunk = await readWithAbort(reader, signal);
+        } catch (error) {
+          if (signal.aborted) {
+            void reader.cancel(signal.reason).catch(() => undefined);
+          }
+          throw error;
+        }
+
+        const { done, value } = chunk;
         if (done) break;
         if (job.cancelled) {
-          await reader.cancel().catch(() => undefined);
+          void reader.cancel(new Error("client disconnected")).catch(() => undefined);
           return;
         }
         if (value?.byteLength) await writeChunk(job.response, value);
       }
       if (!job.response.writableEnded && !job.response.destroyed) job.response.end();
     } finally {
-      reader.releaseLock();
+      try {
+        reader.releaseLock();
+      } catch {
+        // An aborted pending read may keep the lock until cancellation settles.
+      }
     }
-  }
-}
+  }}
