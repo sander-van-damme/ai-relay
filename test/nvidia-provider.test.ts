@@ -213,7 +213,7 @@ test("NVIDIA successful execution calls chat completions and releases concurrenc
 });
 
 
-test("NVIDIA streaming requests usage and preserves downstream SSE bytes", async () => {
+test("NVIDIA streaming hides relay-forced usage when the client disables it", async () => {
   const restoreKey = installKey();
   const originalFetch = globalThis.fetch;
   let expectedPromptTokens = 0;
@@ -274,18 +274,10 @@ test("NVIDIA streaming requests usage and preserves downstream SSE bytes", async
     assert.deepEqual(observedRequest?.stream_options, { include_usage: true });
 
     const downstream = await result.response.text();
-    const expectedUsage = {
-      prompt_tokens: expectedPromptTokens,
-      completion_tokens: 7,
-      total_tokens: expectedPromptTokens + 7,
-    };
-    const expectedSse = [
+    assert.equal(downstream, [
       'data: {"id":"chatcmpl-test","choices":[{"index":0,"delta":{"content":"hello"}}]}\n\n',
-      `data: ${JSON.stringify({ id: "chatcmpl-test", choices: [], usage: expectedUsage })}\n\n`,
       "data: [DONE]\n\n",
-    ].join("");
-
-    assert.equal(downstream, expectedSse);
+    ].join(""));
     assert.deepEqual(await result.usage, {
       inputTokens: expectedPromptTokens,
       outputTokens: 7,
@@ -294,6 +286,57 @@ test("NVIDIA streaming requests usage and preserves downstream SSE bytes", async
 
     result.release();
     assert.equal(provider.status().models.find((model) => model.id === "nvidia/openai/gpt-oss-20b")?.active, 0);
+  } finally {
+    globalThis.fetch = originalFetch;
+    restoreKey();
+  }
+});
+
+test("NVIDIA streaming preserves usage when the client requests it", async () => {
+  const restoreKey = installKey();
+  const originalFetch = globalThis.fetch;
+  let expectedPromptTokens = 0;
+
+  globalThis.fetch = async (_input, init) => {
+    const request = JSON.parse(String(init?.body)) as Record<string, unknown>;
+    assert.deepEqual(request.stream_options, { include_usage: true });
+    const usage = {
+      prompt_tokens: expectedPromptTokens,
+      completion_tokens: 3,
+      total_tokens: expectedPromptTokens + 3,
+    };
+    return new Response([
+      'data: {"id":"chatcmpl-test","choices":[{"index":0,"delta":{"content":"hello"}}]}\n\n',
+      `data: ${JSON.stringify({ id: "chatcmpl-test", choices: [], usage })}\n\n`,
+      "data: [DONE]\n\n",
+    ].join(""), { headers: { "content-type": "text/event-stream" } });
+  };
+
+  try {
+    const provider = createNvidiaProvider();
+    const streamBody = { ...body, stream_options: { include_usage: true } };
+    const offerResult = await provider.getBestOffer({
+      ...baseRequest,
+      body: streamBody,
+      requestedModel: "nvidia/openai/gpt-oss-20b",
+    }, Date.now());
+    assert.equal(offerResult.status, "offer");
+    if (offerResult.status !== "offer") return;
+    expectedPromptTokens = offerResult.offer.inputTokens;
+
+    const result = await provider.execute(offerResult.offer, streamBody, true, new AbortController().signal);
+    assert.equal(result.status, "success");
+    if (result.status !== "success") return;
+
+    const downstream = await result.response.text();
+    assert.match(downstream, /"choices":\[\],"usage":/);
+    assert.match(downstream, /data: \[DONE\]/);
+    assert.deepEqual(await result.usage, {
+      inputTokens: expectedPromptTokens,
+      outputTokens: 3,
+      totalTokens: expectedPromptTokens + 3,
+    });
+    result.release();
   } finally {
     globalThis.fetch = originalFetch;
     restoreKey();
