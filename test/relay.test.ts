@@ -211,6 +211,29 @@ class StreamingProvider extends FakeProvider {
   }
 }
 
+class ThrowingProvider extends FakeProvider {
+  readonly mode: "sync" | "async";
+
+  constructor(id: string, priority: number, capacity: number, mode: "sync" | "async") {
+    super(id, priority, capacity);
+    this.mode = mode;
+  }
+
+  override execute(
+    offer: ProviderOffer,
+    body: ChatCompletionRequest,
+    _stream: boolean,
+    _signal: AbortSignal,
+  ): Promise<ProviderExecutionResult> {
+    const id = String(body.testId);
+    this.executionOrder.push(id);
+    this.executionKinds.push(offer.kind);
+    const error = new Error(`${this.mode} provider execute failure`);
+    if (this.mode === "sync") throw error;
+    return Promise.reject(error);
+  }
+}
+
 test("upstream rejection details extract structured errors and redact secrets", () => {
   assert.equal(
     upstreamRejectionDetail(JSON.stringify({
@@ -417,6 +440,77 @@ test("retry dispatch timing separates queue wait from request age", async () => 
   const secondRequestAge = Number(second.request_age_ms);
   assert.ok(secondRequestAge - secondQueueWait >= 15);
   assert.equal(response.writableEnded, true);
+});
+
+test("synchronous provider.execute exceptions fail over under the finite provider retry policy", async () => {
+  const throwing = new ThrowingProvider("throwing", 10, 32_000, "sync");
+  const backup = new FakeProvider("backup", 20, 32_000);
+  const scheduler = new RelayScheduler(config(), [throwing, backup]);
+  const response = new FakeResponse();
+  const request = job("sync-throw", response);
+  const lines: Array<Record<string, unknown>> = [];
+  const originalLog = console.log;
+  console.log = (value?: unknown): void => {
+    if (typeof value !== "string") return;
+    try {
+      const parsed = JSON.parse(value) as Record<string, unknown>;
+      if (parsed.request_id === request.id) lines.push(parsed);
+    } catch {
+      // Ignore unrelated output.
+    }
+  };
+
+  try {
+    scheduler.enqueue(request);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  } finally {
+    console.log = originalLog;
+  }
+
+  assert.deepEqual(throwing.executionOrder, ["sync-throw"]);
+  assert.deepEqual(backup.executionOrder, ["sync-throw"]);
+  assert.equal(response.writableEnded, true);
+  assert.match(response.body, /backup/);
+  assert.equal(request.upstreamAbort, undefined);
+
+  const snapshot = scheduler.observability.snapshot(0) as any;
+  assert.equal(snapshot.totals.attempts, 2);
+  assert.equal(snapshot.totals.failedAttempts, 1);
+  assert.equal(snapshot.totals.successes, 1);
+  assert.equal(snapshot.totals.terminalFailures, 0);
+
+  const exception = lines.find((line) => line.event === "provider_execute_exception");
+  assert.ok(exception);
+  assert.equal(exception.request_id, request.id);
+  assert.equal(exception.provider, "throwing");
+  assert.equal(exception.relay_model, "throwing/model");
+  assert.match(String(exception.error), /sync provider execute failure/);
+  assert.equal(typeof exception.attempt_ms, "number");
+});
+
+test("asynchronous provider.execute exceptions on an explicit model exhaust the finite path budget", async () => {
+  const throwing = new ThrowingProvider("throwing", 10, 32_000, "async");
+  const scheduler = new RelayScheduler(config(), [throwing]);
+  const response = new FakeResponse();
+  const request = job("async-throw", response);
+  request.requestedModel = "throwing/model";
+  request.body.model = "throwing/model";
+
+  scheduler.enqueue(request);
+  await new Promise((resolve) => setTimeout(resolve, 60));
+
+  assert.equal(throwing.executionOrder.length, MAX_RETRYABLE_FAILURES_PER_PATH);
+  assert.equal(response.writableEnded, true);
+  assert.match(response.body, /upstream_unavailable/);
+  assert.equal(request.upstreamAbort, undefined);
+  assert.equal(request.retryableFailureCounts.get("provider:throwing"), MAX_RETRYABLE_FAILURES_PER_PATH);
+  assert.equal(request.excludedProviderIds.has("throwing"), true);
+
+  const snapshot = scheduler.observability.snapshot(0) as any;
+  assert.equal(snapshot.totals.attempts, MAX_RETRYABLE_FAILURES_PER_PATH);
+  assert.equal(snapshot.totals.failedAttempts, MAX_RETRYABLE_FAILURES_PER_PATH);
+  assert.equal(snapshot.totals.successes, 0);
+  assert.equal(snapshot.totals.terminalFailures, 1);
 });
 
 test("retryable provider failure falls through to another provider instead of looping", async () => {
