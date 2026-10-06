@@ -110,7 +110,7 @@ The provider therefore:
 
 Groq prompt caching can report `usage.prompt_tokens_details.cached_tokens`. Cached prompt tokens are subtracted from local charged quota because Groq documents cached tokens as not counting toward rate limits.
 
-For streaming requests the provider forces `stream_options.include_usage=true` upstream so quota accounting can be reconciled from the terminal usage event. The upstream OpenAI-compatible stream, including Groq's standard usage-only SSE event, is forwarded to the client.
+For streaming requests the provider forces `stream_options.include_usage=true` upstream so quota accounting can be reconciled from the terminal usage event. The relay observes that event on the same backpressured stream; the usage-only SSE event is forwarded only when the client requested `stream_options.include_usage=true`. Groq's reported `prompt_tokens`, `completion_tokens`, and `total_tokens` are exposed independently through `ProviderUsage`, so observability can aggregate each dimension with explicit coverage without inventing missing values.
 
 ## Rate-limit headers
 

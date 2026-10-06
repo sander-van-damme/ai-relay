@@ -271,6 +271,7 @@ function usage(payload: unknown): Usage | undefined {
 function providerUsage(parsed: Usage | undefined): ProviderUsage | undefined {
   if (!parsed) return undefined;
   return {
+    ...(parsed.prompt !== undefined ? { inputTokens: parsed.prompt } : {}),
     ...(parsed.completion !== undefined ? { outputTokens: parsed.completion } : {}),
     ...(parsed.total !== undefined ? { totalTokens: parsed.total } : {}),
   };

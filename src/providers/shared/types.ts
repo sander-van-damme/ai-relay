@@ -60,11 +60,14 @@ export interface ProviderStatus {
 export type ProviderFailureScope = "provider" | "model";
 
 export interface ProviderUsage {
-  /** Provider-reported input/prompt tokens for the executed upstream request. */
+  /**
+   * Provider-reported token dimensions for the executed upstream request.
+   * Each dimension is independent: providers must expose values they actually
+   * receive and leave missing dimensions undefined rather than deriving them
+   * from routing counts or from the other usage dimensions.
+   */
   inputTokens?: number;
-  /** Provider-reported output/completion tokens. */
   outputTokens?: number;
-  /** Provider-reported total tokens. */
   totalTokens?: number;
 }
 
