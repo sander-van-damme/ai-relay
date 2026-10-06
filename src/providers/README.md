@@ -115,6 +115,8 @@ Cooldowns represent provider health. They must not be tuned around scheduler con
 
 The scheduler separately enforces a finite per-request budget of three retryable failures for each provider/model path. Once exhausted, that path is excluded for that request. This guarantees that a persistently failing path cannot keep a request alive forever.
 
+An unexpected exception escaping `provider.execute()` is contained by the scheduler and treated as a provider-scoped retryable failure for that request. It consumes the same three-attempt path budget. For `auto`, the next routing pass avoids the throwing provider when an alternative is available; for an explicitly selected model, the same provider may be retried only until that finite budget is exhausted, after which the request terminates with a relay error. Providers should still classify expected upstream failures themselves rather than throwing.
+
 ## Observability boundary
 
 Observability must not create provider-specific hooks or inspect concrete provider implementations. The relay may observe only:
