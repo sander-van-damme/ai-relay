@@ -69,6 +69,7 @@ class FakeProvider implements Provider {
   readonly executionOrder: string[] = [];
   failFirstFor = new Set<string>();
   failAlwaysFor = new Set<string>();
+  rejectFor = new Set<string>();
   blockOnFailure = true;
   supportsOverflow = false;
   standardAvailableAt = 0;
@@ -135,6 +136,14 @@ class FakeProvider implements Provider {
     this.active = true;
     await new Promise((resolve) => setTimeout(resolve, this.executionDelayMs));
     this.active = false;
+    if (this.rejectFor.has(id)) {
+      return {
+        status: "rejected",
+        scope: "model",
+        httpStatus: 500,
+        bodyText: JSON.stringify({ error: { message: "Harmony parser failure" } }),
+      };
+    }
     if (this.failFirstFor.delete(id) || this.failAlwaysFor.has(id)) {
       this.blockedUntil = this.blockOnFailure ? Date.now() + 20_000 : 0;
       return { status: "retryable", scope: "provider", reason: "test_failure", retryAt: this.blockedUntil || Date.now() };
@@ -563,6 +572,22 @@ test("asynchronous provider.execute exceptions on an explicit model exhaust the 
   assert.equal(snapshot.totals.failedAttempts, MAX_RETRYABLE_FAILURES_PER_PATH);
   assert.equal(snapshot.totals.successes, 0);
   assert.equal(snapshot.totals.terminalFailures, 1);
+});
+
+test("auto immediately fails over after a model-scoped rejection", async () => {
+  const first = new FakeProvider("first", 10, 16_000);
+  const second = new FakeProvider("second", 20, 32_000);
+  first.rejectFor.add("A");
+  const scheduler = new RelayScheduler(config(), [first, second]);
+  const response = new FakeResponse();
+
+  scheduler.enqueue(job("A", response));
+  await new Promise((resolve) => setTimeout(resolve, 30));
+
+  assert.deepEqual(first.executionOrder, ["A"]);
+  assert.deepEqual(second.executionOrder, ["A"]);
+  assert.equal(response.writableEnded, true);
+  assert.match(response.body, /second/);
 });
 
 test("retryable provider failure falls through to another provider instead of looping", async () => {
