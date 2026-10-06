@@ -148,6 +148,8 @@ systemctl status ai-relay
 
 Useful scheduler fields include `failure_count`, `optimization_wait_ms`, `queue_bypasses`, provider/model selection, and total request time.
 
+Attempt timing is logged with explicit phase semantics. `upstream_response.upstream_ready_ms` measures elapsed time from immediately before `provider.execute()` until the provider returns a `Response`/stream handle; it may include provider-side waiting and SDK work and is **not** a TCP/TLS connection measurement. `attempt_ms` measures elapsed attempt time on retryable failures, rejections, unexpected provider exceptions, upstream body/stream failures, and successful completion.
+
 Provider offer evaluation is logged structurally. At the default `LOG_LEVEL=info`, dispatches, upstream responses, failures, cooldown transitions, recovery, and confirmed/expired overflow boundaries are visible without logging every candidate evaluation. Google emits `google_history_recovery` when it has to bootstrap Antigravity from a transcript or replay external tool history through GenerateContent. Model/provider rejections include a bounded `detail` field derived from the upstream error body; structured `error.code`, `error.status`, and `error.message` are preferred, common credential patterns are redacted, and fallback text is capped at 1,000 characters. Set `LOG_LEVEL=debug` to also see `provider_offer` and `provider_no_offer` events for every provider offer pass, including offer kind, model, authoritative input tokens, effective capacity, availability, and structured no-offer reasons.
 
 ## OpenCode token optimization
