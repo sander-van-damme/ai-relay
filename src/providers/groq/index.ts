@@ -21,6 +21,7 @@ import type {
   ProviderStatus,
   ProviderUsage,
 } from "../shared/types.ts";
+import { observeSseResponse, type ObservedSseResponse } from "../shared/sse.ts";
 import { countGroqInputTokens, GROQ_QWEN_IMAGE_TOKENS, type GroqTokenizerSpec } from "./token-count.ts";
 
 const GROQ_BASE_URL = "https://api.groq.com/openai/v1";
@@ -443,16 +444,33 @@ export class GroqProvider implements Provider {
     return response.json().then((payload: unknown) => this.reconcile(state, event, offer, usage(payload))).catch(() => undefined);
   }
 
-  private async observeStream(response: Response, state: GroqState, event: { at: number; inputTokens: number }, offer: ProviderOffer): Promise<ProviderUsage | undefined> {
-    const text = await response.text();
-    let parsed: Usage | undefined;
-    for (const line of text.split(/\r?\n/)) {
-      if (!line.startsWith("data:")) continue;
-      const data = line.slice(5).trim();
-      if (!data || data === "[DONE]") continue;
-      try { parsed = usage(JSON.parse(data) as unknown) ?? parsed; } catch { /* ignore non-JSON SSE data */ }
-    }
-    return this.reconcile(state, event, offer, parsed);
+  private observeStream(
+    response: Response,
+    state: GroqState,
+    event: { at: number; inputTokens: number },
+    offer: ProviderOffer,
+    includeUsage: boolean,
+  ): ObservedSseResponse<ProviderUsage> {
+    return observeSseResponse(response, (data) => {
+      if (data === "[DONE]") return;
+      try {
+        const payload = JSON.parse(data) as unknown;
+        const parsed = usage(payload);
+        if (!parsed) return;
+
+        const value = this.reconcile(state, event, offer, parsed);
+        if (!value) return;
+        const choices = object(payload)?.choices;
+        const usageOnly = Array.isArray(choices) && choices.length === 0;
+        return {
+          value,
+          forward: includeUsage || !usageOnly,
+        };
+      } catch {
+        // Preserve non-JSON SSE events unchanged.
+        return;
+      }
+    });
   }
 
   async execute(offer: ProviderOffer, body: ChatCompletionRequest, stream: boolean, signal: AbortSignal): Promise<ProviderExecutionResult> {
@@ -502,14 +520,17 @@ export class GroqProvider implements Provider {
       if (previousProviderFailures > 0 || previousModelFailures > 0) {
         log("info", "provider_recovered", { provider: this.id, relay_model: model.id, provider_failures: previousProviderFailures, model_failures: previousModelFailures });
       }
-      const usagePromise = (stream
-        ? this.observeStream(response.clone(), state, event, offer)
-        : this.observeJson(response.clone(), state, event, offer))
+      const clientWantsUsage = streamOptions.include_usage === true;
+      const streaming = stream
+        ? this.observeStream(response, state, event, offer, clientWantsUsage)
+        : undefined;
+      const usagePromise = (streaming?.observed
+        ?? this.observeJson(response.clone(), state, event, offer))
         .catch(() => undefined);
       let released = false;
       return {
         status: "success",
-        response,
+        response: streaming?.response ?? response,
         usage: usagePromise,
         release: () => {
           if (released) return;
