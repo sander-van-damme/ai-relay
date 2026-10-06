@@ -410,3 +410,95 @@ test("NVIDIA does not expose speculative overflow offers", async () => {
     restoreKey();
   }
 });
+
+
+test("NVIDIA strips replayed GPT-OSS reasoning fields before sending the next turn", async () => {
+  const restoreKey = installKey();
+  const originalFetch = globalThis.fetch;
+  const replayBody = {
+    messages: [
+      { role: "user", content: "first" },
+      {
+        role: "assistant",
+        content: "visible answer",
+        reasoning: "hidden provider reasoning",
+        reasoning_content: "alternate hidden reasoning",
+      },
+      { role: "user", content: "continue" },
+    ],
+  };
+
+  globalThis.fetch = async (_input, init) => {
+    const request = JSON.parse(String(init?.body)) as {
+      messages: Array<Record<string, unknown>>;
+    };
+    assert.deepEqual(request.messages, [
+      { role: "user", content: "first" },
+      { role: "assistant", content: "visible answer" },
+      { role: "user", content: "continue" },
+    ]);
+    return jsonResponse({ choices: [], usage: { prompt_tokens: 1, completion_tokens: 0, total_tokens: 1 } });
+  };
+
+  try {
+    const provider = createNvidiaProvider();
+    const offerResult = await provider.getBestOffer({
+      ...baseRequest,
+      body: replayBody,
+      requestedModel: "nvidia/openai/gpt-oss-20b",
+    }, Date.now());
+    assert.equal(offerResult.status, "offer");
+    if (offerResult.status !== "offer") return;
+
+    const result = await provider.execute(
+      offerResult.offer,
+      replayBody,
+      false,
+      new AbortController().signal,
+    );
+    assert.equal(result.status, "success");
+    if (result.status === "success") {
+      await result.usage;
+      result.release();
+    }
+  } finally {
+    globalThis.fetch = originalFetch;
+    restoreKey();
+  }
+});
+
+test("NVIDIA treats GPT-OSS Harmony parser crashes as model-scoped rejection", async () => {
+  const restoreKey = installKey();
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => jsonResponse({
+    error: {
+      message: 'openai_harmony.HarmonyError: unexpected tokens remaining in message header: Some("to=functions.bash")',
+    },
+  }, 500);
+
+  try {
+    const provider = createNvidiaProvider();
+    const offerResult = await provider.getBestOffer({
+      ...baseRequest,
+      requestedModel: "nvidia/openai/gpt-oss-20b",
+    }, Date.now());
+    assert.equal(offerResult.status, "offer");
+    if (offerResult.status !== "offer") return;
+
+    const result = await provider.execute(
+      offerResult.offer,
+      body,
+      false,
+      new AbortController().signal,
+    );
+    assert.equal(result.status, "rejected");
+    if (result.status === "rejected") {
+      assert.equal(result.scope, "model");
+      assert.equal(result.httpStatus, 500);
+    }
+    assert.equal(provider.status().blockedUntil, null);
+  } finally {
+    globalThis.fetch = originalFetch;
+    restoreKey();
+  }
+});
