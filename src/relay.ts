@@ -699,7 +699,7 @@ export class RelayScheduler {
         offer_kind: offer.kind,
         routing_input_tokens: offer.inputTokens,
         status: result.response.status,
-        connect_ms: Date.now() - startedAt,
+        upstream_ready_ms: Date.now() - startedAt,
       });
 
       try {
@@ -735,6 +735,7 @@ export class RelayScheduler {
             relay_model: offer.modelId,
             provider: provider.id,
             error: error instanceof Error ? error.message : String(error),
+            attempt_ms: Date.now() - startedAt,
           });
           if (!job.response.writableEnded && !job.response.destroyed) job.response.end();
         }
