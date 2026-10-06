@@ -18,4 +18,9 @@ test("observability dashboard renders relay and generic provider-contract data",
   assert.match(OBSERVABILITY_HTML, /registered_models/);
   assert.match(OBSERVABILITY_HTML, /routingInputTokens/);
   assert.match(OBSERVABILITY_HTML, /upstreamInputTokens/);
+  assert.match(OBSERVABILITY_HTML, /upstreamInputTokensReported/);
+  assert.match(OBSERVABILITY_HTML, /upstreamOutputTokensReported/);
+  assert.match(OBSERVABILITY_HTML, /upstreamTotalTokensReported/);
+  assert.match(OBSERVABILITY_HTML, /reported/);
+  assert.match(OBSERVABILITY_HTML, /coverage/);
 });
